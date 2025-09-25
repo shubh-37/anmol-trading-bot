@@ -1,0 +1,5 @@
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION BEGIN
+PassengerAppRoot "/home3/presti14/sha.g9properties.com"
+PassengerBaseURI "/"
+PassengerPython "/home3/presti14/virtualenv/sha.g9properties.com/3.11/bin/python"
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION END

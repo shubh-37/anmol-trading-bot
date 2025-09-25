@@ -1,0 +1,9 @@
+fyers-apiv3
+pandas
+pandas-ta
+pyotp
+requests
+flask
+gunicorn
+setuptools
+python-dotenv
