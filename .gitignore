@@ -2,15 +2,19 @@
 .env
 .env.local
 .env.production
+venv
 
 # Sensitive files
 config.ini
 store_token.json
+xts_store_token.json
 
 # Log files
 *.log
 stderr.log
 trading.log
+xts_token_refresh.log
+cron_output.log
 
 # Python
 __pycache__/
@@ -38,3 +42,5 @@ logs/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+ *.csv

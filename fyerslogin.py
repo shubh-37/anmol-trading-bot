@@ -10,7 +10,10 @@ from fyers_apiv3 import fyersModel
 import json
 import os
 from requests.adapters import HTTPAdapter
-from urllib3.util import create_urllib3_context
+try:
+    from urllib3.util.ssl_ import create_urllib3_context
+except ImportError:
+    from urllib3.util import create_urllib3_context
 from urllib3.poolmanager import PoolManager
 import logging
 

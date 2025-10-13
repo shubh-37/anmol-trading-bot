@@ -1,13 +1,10 @@
 import pandas as pd
-from datetime import datetime, timedelta
-from fyerslogin import auto_login
+from datetime import datetime
 from fyers_apiv3 import fyersModel
 import json
 import os
 import re
-import sys
 import requests
-import urllib.parse
 import logging
 from functools import lru_cache
 from dotenv import load_dotenv
@@ -34,29 +31,6 @@ logging.basicConfig(
         logging.FileHandler("trading.log", mode='a')
     ]
 )
-
-
-def extract_option_details(symbol):
-    # Define the regex pattern to extract the components
-    pattern = r'(?P<main_symbol>\w+)(?P<date>\d{2})(?P<month>\d{2})(?P<day>\d{2})(?P<option_type>[CP])(?P<strike>\d+)'
-    
-    match = re.match(pattern, symbol)
-    
-    if match:
-        main_symbol = match.group('main_symbol')
-        date = f"{match.group('date')}-{match.group('month')}-{match.group('day')}"
-        option_type = match.group('option_type').lower()
-        option_type_full = 'CE' if option_type == 'c' else 'PE'
-        strike = match.group('strike')
-        
-        return {
-            'main_symbol': main_symbol,
-            'date': date,
-            'option_type': option_type_full,
-            'strike': strike
-        }
-    else:
-        return None
 
 def send_telegram_message(message):
     """Send message to Telegram with proper error handling"""
@@ -98,21 +72,17 @@ def send_telegram_message(message):
         logger.error(f"Unexpected error in send_telegram_message: {e}")
         return False
 
-
-# Removed dangerous stdout redirection - using proper logging instead
-
-
 def initialize_fyers_client():
     """Initialize Fyers client with proper error handling"""
     try:
         with open("./store_token.json", "r") as access_token_file:
             store_tokenjson = json.load(access_token_file)
             access_token = store_tokenjson["access_token"]
+            logger.info(f"access_token: {access_token}")
 
         fyers = fyersModel.FyersModel(
             client_id=client_id,
-            token=access_token,
-            log_path=os.path.join(os.getcwd(), "logs")
+            token=access_token
         )
 
         # Test connection
@@ -133,7 +103,6 @@ def initialize_fyers_client():
 # Initialize global fyers client
 fyers = initialize_fyers_client()
 
-    
 @lru_cache(maxsize=100)
 def get_future_name(symbol, exchange):
     """Get future symbol name with caching for performance"""
@@ -200,42 +169,6 @@ def get_future_name(symbol, exchange):
         logger.error(f"Error in get_future_name: {e}")
         return None, None
 
-
-# pp = get_future_name(symbol="GOLDM",exchnge="MCX")
-
-# print(pp)
-        
-def get_sport_name(symbol,exchnge):
-    try:
-        if exchnge == "NSE":
-            EXCHNGE_NO = 10
-            local_filename = "NSE_CM.csv"
-             
-        elif exchnge == "MCX":
-            local_filename = "MCX_COM.csv"
-            EXCHNGE_NO = 30 
-        elif exchnge == "BSE":
-            local_filename = "BSE_CM.csv"
-            EXCHNGE_NO = 10
-        column_names = [
-            "num", "sym des", "exch no", "lot size", "tick size", "blank",
-            "timing", "date", "Time", "symbol name",
-            "ID 1", "id 2", "token no", "symbol main name", "ISIN", "strike", "option type", "pass", "none", "0", "0.0"
-        ]
-        df = pd.read_csv(local_filename, header=None, names=column_names)
-        print(df)
-        df = df[(df["exch no"] == EXCHNGE_NO) & (df["symbol main name"] == symbol)]
-        #print(df)
-        first_row = df.iloc[0]
-        print(first_row)
-        symbol_name = first_row['symbol name']
-        # lot_size = first_row["lot size"]
-        return symbol_name
-    except Exception as e:
-        return None
-
-import pandas as pd
-
 def getting_strike(symbol, option_type, strike,exchnge,date):
     print(symbol, option_type, strike, date)
     if symbol is not None:
@@ -245,8 +178,6 @@ def getting_strike(symbol, option_type, strike,exchnge,date):
             EXCHNGE_NO = 11 
         elif exchnge == "MCX":
             local_filename = "MCX_COM.csv"
- 
-                        
         elif exchnge == "BSE":
             local_filename = "BSE_FO.csv"
             if symbol == "BSX":
@@ -308,12 +239,6 @@ def getting_strike(symbol, option_type, strike,exchnge,date):
 
     else:
         return None, None, None, None, None
-    
-
-
-
-# Removed unused parse_message_tv function - dead code cleanup    
-    
 
 def cancel_orders_for_all():
     response = fyers.orderbook()
@@ -322,15 +247,12 @@ def cancel_orders_for_all():
     filtered_data = [order for order in trading_data.get('orderBook', []) if order.get('status') == 6]
     if not filtered_data :
         print("All positions are closed. nothing to cancle")
-    #print(filtered_data)    
     else:
         filtered_ids = [order.get('id') for order in filtered_data]
         for order_id in filtered_ids:
             data = {"id": order_id}
             response = fyers.cancel_order(data=data)
             print(response) 
-
-
 
 def cancel_single_order(symbol):
     response = fyers.orderbook()
@@ -347,22 +269,10 @@ def cancel_single_order(symbol):
             data = {"id": order_id}
             response = fyers.cancel_order(data=data)
             print(response) 
-            
-
-
-# Fixed typo: cancel_single_order
-def insideexit_order_symbol(symbol_id):
-    data = {
-        "id":symbol_id
-    }
-    
-    response = fyers.exit_positions(data=data)
-    #print(response)    
 
 def exit_single_order(symbol):
     position = fyers.positions()
     print(position)
-    
 
     if not position['netPositions']:
         print("No active positions.")
@@ -370,8 +280,6 @@ def exit_single_order(symbol):
 
     for order in position['netPositions']:
         if order['symbol'] == symbol and order['netQty']  != 0 :
-
-            
             # Prepare data for the exit request
             data = {
                 "id": order['id']
@@ -380,7 +288,6 @@ def exit_single_order(symbol):
             # Attempt to exit the position
             response = fyers.exit_positions(data=data)
             print(response)
-            # send_telegram_message(message="hii script is working ")
             
             # Check if the exit was successful
             if response.get('code') == 200:
@@ -394,11 +301,6 @@ def exit_single_order(symbol):
     
     print("open psotion  found for symbol:", symbol)
 
-            
-# exit_single_order("NSE:BANKNIFTY24N1352500CE")
-
-
-
 
 def exit_all_order():
     data = {}
@@ -406,10 +308,9 @@ def exit_all_order():
     response = fyers.exit_positions(data=data)
     print(response)  
     send_telegram_message(response)
+
 def placing_market(fyers,symbol,qty,buy_sell,productType):
-    
-        #order_tag = f"st{strategy}si{signal}".replace(':', '').replace(',', '').replace('.', '')  # Remove any invalid characters
-        data = {
+    data = {
             "symbol":symbol,
             "qty":abs(qty),
             "type":2,
@@ -422,11 +323,9 @@ def placing_market(fyers,symbol,qty,buy_sell,productType):
             "offlineOrder":False,
             "orderTag":"RASHALGOMRKT",
         } 
-        response = fyers.place_order(data=data)
-        print(response)
-        send_telegram_message(response)
-
-
+    response = fyers.place_order(data=data)
+    print(response)
+    send_telegram_message(response)
 
 def exit_half_position(symbol,match_qty):
     position = fyers.positions()
@@ -449,8 +348,6 @@ def exit_half_position(symbol,match_qty):
                     qty = order['netQty'] - match_qty
                     placing_market(fyers, symbol, qty, buy_sell=1, productType=order['productType'])
                     print(f"sell side half exit is working exit qty with {qty} ")
-
-# exit_half_position(symbol="NSE:BANKNIFTY24N1352500CE",match_qty=30)
 
 
 def placing_limit(fyers,symbol,qty,limitPrice,buy_sell,order_type):
@@ -480,35 +377,8 @@ def placing_limit(fyers,symbol,qty,limitPrice,buy_sell,order_type):
     print(data)
     response = fyers.place_order(data=data)
     print(response)
-    #print(data)
-    #response = data
     print(f"{order_type} order place {symbol}")
     send_telegram_message(f"{order_type} order place {symbol} {response}")
-
-def place_market_order(fyers, symbol, qty, buy_sell):
-
-    data = {
-        "symbol":symbol,
-        "qty":abs(qty),
-        "type":1,
-        "side":buy_sell,
-        "productType":"MARGIN",
-        "limitPrice":0,
-        "stopPrice":0,
-        "validity":"DAY",
-        "disclosedQty":0,
-        "offlineOrder":False,
-        "orderTag":"tag1" 
-    }
-    print(data)
-    response = data
-    # response = fyers.place_order(data=data)
-    # print(response)
-
-    logger.info(f"Market order placed for {symbol}")
-    send_telegram_message(f"Market order placed for {symbol}: {response}")
-
-
 
 def order_placement_buy_side(symbol, qty, limitPrice, order_type):
     position = fyers.positions()  # Fetch positions from fyers
@@ -549,9 +419,27 @@ def order_placement_buy_side(symbol, qty, limitPrice, order_type):
         print(f"No symbol found for {symbol}. Placing order in buy side.")
         placing_limit(fyers, symbol, qty, limitPrice, buy_sell=1, order_type=order_type)
 
-
-
-
+def extract_option_details(symbol):
+    # Define the regex pattern to extract the components
+    pattern = r'(?P<main_symbol>\w+)(?P<date>\d{2})(?P<month>\d{2})(?P<day>\d{2})(?P<option_type>[CP])(?P<strike>\d+)'
+    
+    match = re.match(pattern, symbol)
+    
+    if match:
+        main_symbol = match.group('main_symbol')
+        date = f"{match.group('date')}-{match.group('month')}-{match.group('day')}"
+        option_type = match.group('option_type').lower()
+        option_type_full = 'CE' if option_type == 'c' else 'PE'
+        strike = match.group('strike')
+        
+        return {
+            'main_symbol': main_symbol,
+            'date': date,
+            'option_type': option_type_full,
+            'strike': strike
+        }
+    else:
+        return None
 
 def order_placement_sell_side(symbol,qty,limitPrice,order_type):
     position = fyers.positions()
@@ -586,14 +474,12 @@ def order_placement_sell_side(symbol,qty,limitPrice,order_type):
         print(f"No symbol found for {symbol}. Placing order in sell side.")
         placing_limit(fyers, symbol, qty, limitPrice, buy_sell=-1, order_type=order_type)
 
-
 def exit_only_sell_trades(symbol):
     position = fyers.positions()
     print(position)
     if not position['netPositions']:
         print("No active positions.")
 
-    
     if any(order['symbol'] == symbol for order in position['netPositions']):
         # If the symbol exists, process the net positions
         for order in position['netPositions']:
@@ -609,7 +495,6 @@ def exit_only_buy_trades(symbol):
     if not position['netPositions']:
         print("No active positions.")
 
-    
     if any(order['symbol'] == symbol for order in position['netPositions']):
         # If the symbol exists, process the net positions
         for order in position['netPositions']:
@@ -617,16 +502,5 @@ def exit_only_buy_trades(symbol):
                 if order['netQty'] != 0:
                     if order['side'] == 1:
                         print("Buy side position open. Will not place any order in the buy side as position is already open.")
-                        exit_single_order(symbol)  # Exit current order    
-
-     
-                
-# order_placement_buy_side(symbol="NSE:BANKNIFTY24N1352500CE",qty=15,limitPrice=1)   
-# order_placement_buy_side(symbol="NSE:BANKNIFTY24N1352500CE",qty=15,limitPrice=1)   
-
-
-
-
-
-
+                        exit_single_order(symbol)  # Exit current order
 
