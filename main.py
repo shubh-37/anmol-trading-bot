@@ -137,6 +137,115 @@ def send_telegram_message(message, chat_id):
         return False
 
 
+def validate_json_payload(data):
+    """Validate JSON payload structure"""
+    if not isinstance(data, dict):
+        raise ValueError("Payload must be a JSON object")
+    
+    # Check for required top-level keys
+    required_keys = ["strategy", "symbol", "price", "meta"]
+    for key in required_keys:
+        if key not in data:
+            raise ValueError(f"Missing required key: {key}")
+    
+    # Validate strategy object
+    strategy_required = ["action", "contracts", "comment", "position_size"]
+    for key in strategy_required:
+        if key not in data["strategy"]:
+            raise ValueError(f"Missing required strategy field: {key}")
+    
+    # Validate symbol object
+    symbol_required = ["exchange", "ticker"]
+    for key in symbol_required:
+        if key not in data["symbol"]:
+            raise ValueError(f"Missing required symbol field: {key}")
+    
+    # Validate price object
+    price_required = ["open"]
+    for key in price_required:
+        if key not in data["price"]:
+            raise ValueError(f"Missing required price field: {key}")
+    
+    # Validate meta object
+    if "tag" not in data["meta"]:
+        raise ValueError("Missing required meta field: tag")
+    
+    return True
+
+
+def parse_json_message(json_data):
+    """Parse JSON trading message with proper validation and error handling"""
+    try:
+        # Validate the payload structure
+        validate_json_payload(json_data)
+        
+        # Check if the tag contains "radhe algo"
+        tag = json_data["meta"].get("tag", "").lower()
+        if "radhe" not in tag or "algo" not in tag:
+            logger.debug("Message does not contain required keywords in tag")
+            return None
+        
+        result = {}
+        
+        # Extract exchange and symbol
+        result["exchange"] = json_data["symbol"]["exchange"]
+        symbol_raw = json_data["symbol"]["ticker"]
+        
+        # Process the symbol to determine if it's futures
+        # Check if symbol ends with ! or if it's explicitly marked
+        if symbol_raw.endswith("!"):
+            result["symbol"] = re.sub(r"[\d!]+$", "", symbol_raw)
+            result["buyfut"] = 1
+        else:
+            # For options/other instruments
+            result["symbol"] = symbol_raw
+            result["buyfut"] = 0
+        
+        # Extract position: contracts * position_size
+        # contracts = quantity/lots to trade
+        # position_size = direction (1 for long, -1 for short) and multiplier
+        try:
+            contracts = int(json_data["strategy"]["contracts"])
+            position_size = int(json_data["strategy"]["position_size"])
+            result["new_strategy_position"] = contracts * position_size
+        except (ValueError, TypeError):
+            logger.error("Invalid contracts or position_size format")
+            return None
+        
+        # Extract comment
+        result["comment"] = json_data["strategy"]["comment"].strip()[:100]
+        
+        # Extract open price
+        try:
+            result["open_price"] = float(json_data["price"]["open"])
+        except (ValueError, TypeError):
+            logger.error("Invalid open price format")
+            return None
+        
+        # Extract order type (default to MARKET if not specified)
+        result["order_type"] = json_data["meta"].get("order_type", "MARKET").upper()
+        
+        # Handle time fields - use current time if not provided
+        current_utc = datetime.datetime.utcnow()
+        result["time_utc"] = current_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        ist_time = current_utc + datetime.timedelta(hours=5, minutes=30)
+        result["time_ist"] = ist_time.strftime("%Y-%m-%dT%H:%M:%S")
+        
+        # Extract interval (default to empty string if not provided)
+        result["interval"] = json_data["meta"].get("interval", "")
+        
+        logger.debug(f"Successfully parsed JSON message: {result}")
+        return result
+        
+    except ValueError as e:
+        logger.error(f"Validation error in JSON message: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error parsing JSON message: {e}")
+        return None
+
+
 def validate_input_message(message):
     """Validate and sanitize input message"""
     if not message:
@@ -164,8 +273,9 @@ def validate_input_message(message):
 
     return message
 
+
 def parse_message(message):
-    """Parse trading message with proper validation and error handling"""
+    """Parse trading message with proper validation and error handling (Legacy text format)"""
     try:
         # Validate input
         message = validate_input_message(message)
@@ -363,6 +473,7 @@ def order_king_executer(result):
         print("Message ignored due to missing keywords.")
         send_telegram_message("Message ignored due to missing keywords.", chat_id=TEST3_CHAT_ID)
 
+
 def get_instrument_details(symbol, exchange):
     """
     Get exchange segment and instrument ID from CSV files for XTS
@@ -375,11 +486,28 @@ def get_instrument_details(symbol, exchange):
         tuple: (exchange_segment, exchange_instrument_id) or (None, None)
     """
     try:
-        # Exchange configuration
+        # Exchange configuration with proper XTS segment names
         exchange_config = {
-            "NSE": {"filename": "NSE_FO.csv", "exchange_segment": 2},  # NFO segment
-            "MCX": {"filename": "MCX_COM.csv", "exchange_segment": 4},  # MCX segment
-            "BSE": {"filename": "BSE_FO.csv", "exchange_segment": 3}   # BFO segment
+            "NSE": {
+                "filename": "NSE_FO.csv", 
+                "exchange_segment": "NSEFO"  # NSE Futures & Options
+            },
+            "NSE_CM": {
+                "filename": "NSE_CM.csv", 
+                "exchange_segment": "NSECM"  # NSE Capital Market (Cash)
+            },
+            "MCX": {
+                "filename": "MCX_COM.csv", 
+                "exchange_segment": "MCXFO"  # MCX Futures & Options
+            },
+            "BSE": {
+                "filename": "BSE_FO.csv", 
+                "exchange_segment": "BSEFO"  # BSE Futures & Options
+            },
+            "BSE_CM": {
+                "filename": "BSE_CM.csv", 
+                "exchange_segment": "BSECM"  # BSE Capital Market (Cash)
+            }
         }
         
         if exchange not in exchange_config:
@@ -421,7 +549,7 @@ def get_instrument_details(symbol, exchange):
         logger.error(f"Error getting instrument details: {e}")
         return None, None
 
-
+        
 def order_king_executer_xts(result, product_type="MIS"):
     """
     Execute trading orders for XTS platform based on webhook data
@@ -575,210 +703,349 @@ def order_king_executer_xts(result, product_type="MIS"):
         except Exception as e:
             error_msg = f"❌ Error executing order: {str(e)}"
             logger.error(error_msg)
-            send_telegram_message(error_msg,chat_id=TEST3_CHAT_ID   )
+            send_telegram_message(error_msg,chat_id=TEST3_CHAT_ID)
             
     else:
         print("Message ignored due to missing keywords.")
         send_telegram_message("⚠️ Message ignored due to missing keywords.",chat_id=TEST3_CHAT_ID)
 
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"message": "Hello, World!"}), 200
 
-# WSGI application
+
 @app.route("/sha/fyers", methods=["POST"])
 def process_message():
-    """Process webhook messages with comprehensive error handling and validation"""
+    """Process webhook messages with comprehensive error handling and validation (JSON format)"""
     try:
-        # Rate limiting check (basic implementation)
-        # In production, use Redis or similar for distributed rate limiting
-
-        # Get and validate request data
-        if not request.data:
-            logger.warning("Empty request received")
-            return jsonify({"error": "Empty request"}), 400
-
-        try:
-            text_data = request.data.decode("utf-8")
-        except UnicodeDecodeError:
-            logger.error("Invalid UTF-8 encoding in request")
-            return jsonify({"error": "Invalid encoding"}), 400
-
-        # Input validation
-        if len(text_data) > 10000:
-            logger.warning("Request data too large")
-            return jsonify({"error": "Message too large"}), 400
-
-        logger.info(f"Received webhook data (length: {len(text_data)})")
-        logger.debug(f"Webhook content: {text_data[:200]}...")  # Log only first 200 chars
-
-        message_lower = text_data.lower()
-
-        # Handle simple commands
-        if message_lower in ["hii", "hello"]:
-            response_msg = f"{message_lower} - Trading script is operational"
-            send_telegram_message(response_msg, chat_id=TEST3_CHAT_ID)
-            return jsonify({"status": "ok", "message": "Health check processed"}), 200
-
-        elif message_lower == "exit all":
-            logger.info("Exit all command received")
-            send_telegram_message("Executing exit all positions command", chat_id=TEST3_CHAT_ID)
+        # Check if request is JSON
+        if request.is_json:
             try:
-                exit_all_order()
-                send_telegram_message("✅ Exit all positions completed", chat_id=TEST3_CHAT_ID)
+                json_data = request.get_json()
+                logger.info(f"Received JSON webhook data")
+                logger.debug(f"JSON content: {json_data}")
             except Exception as e:
-                logger.error(f"Failed to exit all positions: {e}")
-                send_telegram_message(f"❌ Exit all positions failed: {str(e)}", chat_id=TEST3_CHAT_ID)
-            return jsonify({"status": "ok", "message": "Exit all processed"}), 200
-
-        elif message_lower == "cancel all":
-            logger.info("Cancel all command received")
-            send_telegram_message("Executing cancel all orders command", chat_id=TEST3_CHAT_ID)
-            try:
-                cancel_orders_for_all()
-                send_telegram_message("✅ Cancel all orders completed", chat_id=TEST3_CHAT_ID)
-            except Exception as e:
-                logger.error(f"Failed to cancel all orders: {e}")
-                send_telegram_message(f"❌ Cancel all orders failed: {str(e)}", chat_id=TEST3_CHAT_ID)
-            return jsonify({"status": "ok", "message": "Cancel all processed"}), 200
-
-        # Send notification to Telegram (with length limit)
-        notification_msg = text_data[:500] + "..." if len(text_data) > 500 else text_data
-        send_telegram_message(f"📨 Webhook received: {notification_msg}", chat_id=TEST3_CHAT_ID)
-
-        # Parse and execute trading order
-        parsed_data = parse_message(text_data)
-        logger.debug(f"Parsed data: {parsed_data}")
-
-        if parsed_data:
-            try:
-                # Send parsed data confirmation
-                confirmation_msg = f"📊 Parsed data: {str(parsed_data)[:300]}..."
-                send_telegram_message(confirmation_msg, chat_id=TEST3_CHAT_ID)
-
-                # Save to CSV
-                logger.info("Saving trading data to CSV")
-                if not save_to_csv(parsed_data):
-                    logger.error("Failed to save CSV data")
-                    send_telegram_message("⚠️ Warning: Failed to save trade data to CSV", chat_id=TEST3_CHAT_ID)
-                else:
-                    logger.info("Trading data saved to CSV successfully")
-
-                # Execute trading logic
-                logger.info("Executing trading order")
-                order_king_executer(parsed_data)
-                send_telegram_message("✅ Trading order processed successfully", chat_id=TEST3_CHAT_ID)
-
-            except Exception as e:
-                error_msg = f"Error processing trading data: {str(e)}"
-                logger.error(error_msg)
-                send_telegram_message(f"❌ Trading error: {str(e)}", chat_id=TEST3_CHAT_ID)
-                return jsonify({"error": "Trading processing failed", "details": str(e)}), 500
+                logger.error(f"Failed to parse JSON: {e}")
+                return jsonify({"error": "Invalid JSON format"}), 400
+            
+            # Handle simple commands in JSON format
+            if "command" in json_data:
+                command = json_data["command"].lower()
+                
+                if command in ["hii", "hello"]:
+                    response_msg = f"{command} - Fyers Trading script is operational"
+                    send_telegram_message(response_msg, chat_id=TEST3_CHAT_ID)
+                    return jsonify({"status": "ok", "message": "Health check processed"}), 200
+                
+                elif command == "exit all":
+                    logger.info("Exit all command received")
+                    send_telegram_message("Executing exit all positions command", chat_id=TEST3_CHAT_ID)
+                    try:
+                        exit_all_order()
+                        send_telegram_message("✅ Exit all positions completed", chat_id=TEST3_CHAT_ID)
+                    except Exception as e:
+                        logger.error(f"Failed to exit all positions: {e}")
+                        send_telegram_message(f"❌ Exit all positions failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"status": "ok", "message": "Exit all processed"}), 200
+                
+                elif command == "cancel all":
+                    logger.info("Cancel all command received")
+                    send_telegram_message("Executing cancel all orders command", chat_id=TEST3_CHAT_ID)
+                    try:
+                        cancel_orders_for_all()
+                        send_telegram_message("✅ Cancel all orders completed", chat_id=TEST3_CHAT_ID)
+                    except Exception as e:
+                        logger.error(f"Failed to cancel all orders: {e}")
+                        send_telegram_message(f"❌ Cancel all orders failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"status": "ok", "message": "Cancel all processed"}), 200
+            
+            # Send notification to Telegram
+            notification_msg = f"📨 JSON Webhook received: {str(json_data)[:300]}..."
+            send_telegram_message(notification_msg, chat_id=TEST3_CHAT_ID)
+            
+            # Parse JSON trading message
+            parsed_data = parse_json_message(json_data)
+            logger.debug(f"Parsed data: {parsed_data}")
+            
+            if parsed_data:
+                try:
+                    # Send parsed data confirmation
+                    confirmation_msg = f"📊 Parsed data: {str(parsed_data)[:300]}..."
+                    send_telegram_message(confirmation_msg, chat_id=TEST3_CHAT_ID)
+                    
+                    # Save to CSV
+                    logger.info("Saving trading data to CSV")
+                    if not save_to_csv(parsed_data):
+                        logger.error("Failed to save CSV data")
+                        send_telegram_message("⚠️ Warning: Failed to save trade data to CSV", chat_id=TEST3_CHAT_ID)
+                    else:
+                        logger.info("Trading data saved to CSV successfully")
+                    
+                    # Execute trading logic
+                    logger.info("Executing trading order")
+                    order_king_executer(parsed_data)
+                    send_telegram_message("✅ Trading order processed successfully", chat_id=TEST3_CHAT_ID)
+                    
+                except Exception as e:
+                    error_msg = f"Error processing trading data: {str(e)}"
+                    logger.error(error_msg)
+                    send_telegram_message(f"❌ Trading error: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"error": "Trading processing failed", "details": str(e)}), 500
+            else:
+                logger.info("Message did not match trading pattern - no action taken")
+                return jsonify({"status": "ok", "message": "Message processed but no trading action required"}), 200
+            
+            return jsonify({"status": "success", "message": "JSON Trading message processed"}), 200
+        
         else:
-            logger.info("Message did not match trading pattern - no action taken")
-            return jsonify({"status": "ok", "message": "Message processed but no trading action required"}), 200
-
-        return jsonify({"status": "success", "message": "Trading message processed"}), 200
-
+            # Fallback to legacy text format
+            if not request.data:
+                logger.warning("Empty request received")
+                return jsonify({"error": "Empty request"}), 400
+            
+            try:
+                text_data = request.data.decode("utf-8")
+            except UnicodeDecodeError:
+                logger.error("Invalid UTF-8 encoding in request")
+                return jsonify({"error": "Invalid encoding"}), 400
+            
+            if len(text_data) > 10000:
+                logger.warning("Request data too large")
+                return jsonify({"error": "Message too large"}), 400
+            
+            logger.info(f"Received legacy text webhook data (length: {len(text_data)})")
+            
+            message_lower = text_data.lower()
+            
+            if message_lower in ["hii", "hello"]:
+                response_msg = f"{message_lower} - Trading script is operational"
+                send_telegram_message(response_msg, chat_id=TEST3_CHAT_ID)
+                return jsonify({"status": "ok", "message": "Health check processed"}), 200
+            
+            elif message_lower == "exit all":
+                logger.info("Exit all command received")
+                send_telegram_message("Executing exit all positions command", chat_id=TEST3_CHAT_ID)
+                try:
+                    exit_all_order()
+                    send_telegram_message("✅ Exit all positions completed", chat_id=TEST3_CHAT_ID)
+                except Exception as e:
+                    logger.error(f"Failed to exit all positions: {e}")
+                    send_telegram_message(f"❌ Exit all positions failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                return jsonify({"status": "ok", "message": "Exit all processed"}), 200
+            
+            elif message_lower == "cancel all":
+                logger.info("Cancel all command received")
+                send_telegram_message("Executing cancel all orders command", chat_id=TEST3_CHAT_ID)
+                try:
+                    cancel_orders_for_all()
+                    send_telegram_message("✅ Cancel all orders completed", chat_id=TEST3_CHAT_ID)
+                except Exception as e:
+                    logger.error(f"Failed to cancel all orders: {e}")
+                    send_telegram_message(f"❌ Cancel all orders failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                return jsonify({"status": "ok", "message": "Cancel all processed"}), 200
+            
+            notification_msg = text_data[:500] + "..." if len(text_data) > 500 else text_data
+            send_telegram_message(f"📨 Webhook received: {notification_msg}", chat_id=TEST3_CHAT_ID)
+            
+            parsed_data = parse_message(text_data)
+            
+            if parsed_data:
+                try:
+                    confirmation_msg = f"📊 Parsed data: {str(parsed_data)[:300]}..."
+                    send_telegram_message(confirmation_msg, chat_id=TEST3_CHAT_ID)
+                    
+                    logger.info("Saving trading data to CSV")
+                    if not save_to_csv(parsed_data):
+                        logger.error("Failed to save CSV data")
+                        send_telegram_message("⚠️ Warning: Failed to save trade data to CSV", chat_id=TEST3_CHAT_ID)
+                    
+                    logger.info("Executing trading order")
+                    order_king_executer(parsed_data)
+                    send_telegram_message("✅ Trading order processed successfully", chat_id=TEST3_CHAT_ID)
+                    
+                except Exception as e:
+                    error_msg = f"Error processing trading data: {str(e)}"
+                    logger.error(error_msg)
+                    send_telegram_message(f"❌ Trading error: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"error": "Trading processing failed", "details": str(e)}), 500
+            else:
+                logger.info("Message did not match trading pattern - no action taken")
+                return jsonify({"status": "ok", "message": "Message processed but no trading action required"}), 200
+            
+            return jsonify({"status": "success", "message": "Trading message processed"}), 200
+    
     except Exception as e:
         error_message = f"Unexpected error in webhook processing: {str(e)}"
         logger.error(error_message, exc_info=True)
         send_telegram_message(f"🚨 Critical error in webhook: {str(e)}", chat_id=TEST3_CHAT_ID)
         return jsonify({"error": "Internal server error", "message": str(e)}), 500
 
+
 @app.route("/sha/xts", methods=["POST"])
 def process_message_xts():
-    """Process webhook messages for XTS with comprehensive error handling and validation"""
+    """Process webhook messages for XTS with comprehensive error handling and validation (JSON format)"""
     try:
-        # Get and validate request data
-        if not request.data:
-            logger.warning("Empty request received")
-            return jsonify({"error": "Empty request"}), 400
-
-        try:
-            text_data = request.data.decode("utf-8")
-        except UnicodeDecodeError:
-            logger.error("Invalid UTF-8 encoding in request")
-            return jsonify({"error": "Invalid encoding"}), 400
-
-        # Input validation
-        if len(text_data) > 10000:
-            logger.warning("Request data too large")
-            return jsonify({"error": "Message too large"}), 400
-
-        logger.info(f"[XTS] Received webhook data (length: {len(text_data)})")
-        logger.debug(f"Webhook content: {text_data[:200]}...")
-
-        message_lower = text_data.lower()
-
-        # Handle simple commands
-        if message_lower in ["hii", "hello"]:
-            response_msg = f"{message_lower} - XTS Trading script is operational"
-            send_telegram_message(response_msg,chat_id=TEST3_CHAT_ID)
-            return jsonify({"status": "ok", "message": "Health check processed"}), 200
-
-        elif message_lower == "exit all":
-            logger.info("[XTS] Exit all command received")
-            send_telegram_message("Executing exit all positions command (XTS)",chat_id=TEST3_CHAT_ID)
+        # Check if request is JSON
+        if request.is_json:
             try:
-                exit_all_order()
+                json_data = request.get_json()
+                logger.info(f"[XTS] Received JSON webhook data")
+                logger.debug(f"JSON content: {json_data}")
             except Exception as e:
-                logger.error(f"Failed to exit all positions: {e}")
-                send_telegram_message(f"❌ Exit all positions failed: {str(e)}",chat_id=TEST3_CHAT_ID)
-            return jsonify({"status": "ok", "message": "Exit all processed"}), 200
-
-        elif message_lower == "cancel all":
-            logger.info("[XTS] Cancel all command received")
-            send_telegram_message("Executing cancel all orders command (XTS)",chat_id=TEST3_CHAT_ID)
-            try:
-                cancel_orders_for_all()
-            except Exception as e:
-                logger.error(f"Failed to cancel all orders: {e}")
-                send_telegram_message(f"❌ Cancel all orders failed: {str(e)}",chat_id=TEST3_CHAT_ID)
-            return jsonify({"status": "ok", "message": "Cancel all processed"}), 200
-
-        # Send notification to Telegram
-        notification_msg = text_data[:500] + "..." if len(text_data) > 500 else text_data
-        send_telegram_message(f"📨 [XTS] Webhook received: {notification_msg}",chat_id=TEST3_CHAT_ID)
-
-        # Parse and execute trading order
-        parsed_data = parse_message(text_data)
-        logger.debug(f"Parsed data: {parsed_data}")
-
-        if parsed_data:
-            try:
-                # Send parsed data confirmation
-                confirmation_msg = f"📊 [XTS] Parsed data: {str(parsed_data)[:300]}..."
-                send_telegram_message(confirmation_msg,chat_id=TEST3_CHAT_ID)
-
-                # Save to CSV
-                logger.info("Saving trading data to CSV")
-                if not save_to_csv(parsed_data):
-                    logger.error("Failed to save CSV data")
-                    send_telegram_message("⚠️ Warning: Failed to save trade data to CSV",chat_id=TEST3_CHAT_ID)
-                else:
-                    logger.info("Trading data saved to CSV successfully")
-
-                # Execute trading logic for XTS
-                logger.info("Executing XTS trading order")
-                order_king_executer_xts(parsed_data, product_type="MIS")  # Change to NRML or CNC if needed
-                send_telegram_message("✅ XTS Trading order processed successfully",chat_id=TEST3_CHAT_ID)
-
-            except Exception as e:
-                error_msg = f"Error processing XTS trading data: {str(e)}"
-                logger.error(error_msg)
-                send_telegram_message(f"❌ XTS Trading error: {str(e)}",chat_id=TEST3_CHAT_ID)
-                return jsonify({"error": "Trading processing failed", "details": str(e)}), 500
+                logger.error(f"Failed to parse JSON: {e}")
+                return jsonify({"error": "Invalid JSON format"}), 400
+            
+            # Handle simple commands in JSON format
+            if "command" in json_data:
+                command = json_data["command"].lower()
+                
+                if command in ["hii", "hello"]:
+                    response_msg = f"{command} - XTS Trading script is operational"
+                    send_telegram_message(response_msg, chat_id=TEST3_CHAT_ID)
+                    return jsonify({"status": "ok", "message": "Health check processed"}), 200
+                
+                elif command == "exit all":
+                    logger.info("[XTS] Exit all command received")
+                    send_telegram_message("Executing exit all positions command (XTS)", chat_id=TEST3_CHAT_ID)
+                    try:
+                        exit_all_order()
+                        send_telegram_message("✅ Exit all positions completed", chat_id=TEST3_CHAT_ID)
+                    except Exception as e:
+                        logger.error(f"Failed to exit all positions: {e}")
+                        send_telegram_message(f"❌ Exit all positions failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"status": "ok", "message": "Exit all processed"}), 200
+                
+                elif command == "cancel all":
+                    logger.info("[XTS] Cancel all command received")
+                    send_telegram_message("Executing cancel all orders command (XTS)", chat_id=TEST3_CHAT_ID)
+                    try:
+                        cancel_orders_for_all()
+                        send_telegram_message("✅ Cancel all orders completed", chat_id=TEST3_CHAT_ID)
+                    except Exception as e:
+                        logger.error(f"Failed to cancel all orders: {e}")
+                        send_telegram_message(f"❌ Cancel all orders failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"status": "ok", "message": "Cancel all processed"}), 200
+            
+            # Send notification to Telegram
+            notification_msg = f"📨 [XTS] JSON Webhook received: {str(json_data)[:300]}..."
+            send_telegram_message(notification_msg, chat_id=TEST3_CHAT_ID)
+            
+            # Parse JSON trading message
+            parsed_data = parse_json_message(json_data)
+            logger.debug(f"Parsed data: {parsed_data}")
+            
+            if parsed_data:
+                try:
+                    # Send parsed data confirmation
+                    confirmation_msg = f"📊 [XTS] Parsed data: {str(parsed_data)[:300]}..."
+                    send_telegram_message(confirmation_msg, chat_id=TEST3_CHAT_ID)
+                    
+                    # Save to CSV
+                    logger.info("Saving trading data to CSV")
+                    if not save_to_csv(parsed_data):
+                        logger.error("Failed to save CSV data")
+                        send_telegram_message("⚠️ Warning: Failed to save trade data to CSV", chat_id=TEST3_CHAT_ID)
+                    else:
+                        logger.info("Trading data saved to CSV successfully")
+                    
+                    # Execute trading logic for XTS
+                    logger.info("Executing XTS trading order")
+                    order_king_executer_xts(parsed_data, product_type="MIS")
+                    send_telegram_message("✅ XTS Trading order processed successfully", chat_id=TEST3_CHAT_ID)
+                    
+                except Exception as e:
+                    error_msg = f"Error processing XTS trading data: {str(e)}"
+                    logger.error(error_msg)
+                    send_telegram_message(f"❌ XTS Trading error: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"error": "Trading processing failed", "details": str(e)}), 500
+            else:
+                logger.info("Message did not match trading pattern - no action taken")
+                return jsonify({"status": "ok", "message": "Message processed but no trading action required"}), 200
+            
+            return jsonify({"status": "success", "message": "XTS JSON Trading message processed"}), 200
+        
         else:
-            logger.info("Message did not match trading pattern - no action taken")
-            return jsonify({"status": "ok", "message": "Message processed but no trading action required"}), 200
-
-        return jsonify({"status": "success", "message": "XTS Trading message processed"}), 200
-
+            # Fallback to legacy text format
+            if not request.data:
+                logger.warning("Empty request received")
+                return jsonify({"error": "Empty request"}), 400
+            
+            try:
+                text_data = request.data.decode("utf-8")
+            except UnicodeDecodeError:
+                logger.error("Invalid UTF-8 encoding in request")
+                return jsonify({"error": "Invalid encoding"}), 400
+            
+            if len(text_data) > 10000:
+                logger.warning("Request data too large")
+                return jsonify({"error": "Message too large"}), 400
+            
+            logger.info(f"[XTS] Received legacy text webhook data (length: {len(text_data)})")
+            
+            message_lower = text_data.lower()
+            
+            if message_lower in ["hii", "hello"]:
+                response_msg = f"{message_lower} - XTS Trading script is operational"
+                send_telegram_message(response_msg, chat_id=TEST3_CHAT_ID)
+                return jsonify({"status": "ok", "message": "Health check processed"}), 200
+            
+            elif message_lower == "exit all":
+                logger.info("[XTS] Exit all command received")
+                send_telegram_message("Executing exit all positions command (XTS)", chat_id=TEST3_CHAT_ID)
+                try:
+                    exit_all_order()
+                    send_telegram_message("✅ Exit all positions completed", chat_id=TEST3_CHAT_ID)
+                except Exception as e:
+                    logger.error(f"Failed to exit all positions: {e}")
+                    send_telegram_message(f"❌ Exit all positions failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                return jsonify({"status": "ok", "message": "Exit all processed"}), 200
+            
+            elif message_lower == "cancel all":
+                logger.info("[XTS] Cancel all command received")
+                send_telegram_message("Executing cancel all orders command (XTS)", chat_id=TEST3_CHAT_ID)
+                try:
+                    cancel_orders_for_all()
+                    send_telegram_message("✅ Cancel all orders completed", chat_id=TEST3_CHAT_ID)
+                except Exception as e:
+                    logger.error(f"Failed to cancel all orders: {e}")
+                    send_telegram_message(f"❌ Cancel all orders failed: {str(e)}", chat_id=TEST3_CHAT_ID)
+                return jsonify({"status": "ok", "message": "Cancel all processed"}), 200
+            
+            notification_msg = text_data[:500] + "..." if len(text_data) > 500 else text_data
+            send_telegram_message(f"📨 [XTS] Webhook received: {notification_msg}", chat_id=TEST3_CHAT_ID)
+            
+            parsed_data = parse_message(text_data)
+            
+            if parsed_data:
+                try:
+                    confirmation_msg = f"📊 [XTS] Parsed data: {str(parsed_data)[:300]}..."
+                    send_telegram_message(confirmation_msg, chat_id=TEST3_CHAT_ID)
+                    
+                    logger.info("Saving trading data to CSV")
+                    if not save_to_csv(parsed_data):
+                        logger.error("Failed to save CSV data")
+                        send_telegram_message("⚠️ Warning: Failed to save trade data to CSV", chat_id=TEST3_CHAT_ID)
+                    
+                    logger.info("Executing XTS trading order")
+                    order_king_executer_xts(parsed_data, product_type="MIS")
+                    send_telegram_message("✅ XTS Trading order processed successfully", chat_id=TEST3_CHAT_ID)
+                    
+                except Exception as e:
+                    error_msg = f"Error processing XTS trading data: {str(e)}"
+                    logger.error(error_msg)
+                    send_telegram_message(f"❌ XTS Trading error: {str(e)}", chat_id=TEST3_CHAT_ID)
+                    return jsonify({"error": "Trading processing failed", "details": str(e)}), 500
+            else:
+                logger.info("Message did not match trading pattern - no action taken")
+                return jsonify({"status": "ok", "message": "Message processed but no trading action required"}), 200
+            
+            return jsonify({"status": "success", "message": "XTS Trading message processed"}), 200
+    
     except Exception as e:
         error_message = f"Unexpected error in XTS webhook processing: {str(e)}"
         logger.error(error_message, exc_info=True)
-        send_telegram_message(f"🚨 Critical error in XTS webhook: {str(e)}",chat_id=TEST3_CHAT_ID)
+        send_telegram_message(f"🚨 Critical error in XTS webhook: {str(e)}", chat_id=TEST3_CHAT_ID)
         return jsonify({"error": "Internal server error", "message": str(e)}), 500
 
 
@@ -786,9 +1053,11 @@ def process_message_xts():
 def not_found(error):
     return jsonify({"error": "Endpoint not found"}), 404
 
+
 @app.errorhandler(405)
 def method_not_allowed(error):
     return jsonify({"error": "Method not allowed"}), 405
+
 
 @app.errorhandler(500)
 def internal_error(error):
