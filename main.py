@@ -321,7 +321,7 @@ def order_king_executer(result):
                 or comment == "Short Exit"
             ):
                 exit_only_sell_trades(symbol=first_symbol)
-             elif (
+            elif (
                 comment == "Stop Loss Long Exit"
                 or comment == "Remaining Long Exit"
                 or comment == "Long SL"
@@ -508,7 +508,7 @@ def order_king_executer_xts(result, product_type="MIS"):
                 print("exit single order called")
                 exit_single_order(first_symbol)
                 
-             elif (
+            elif (
                 comment == "Remaining Short Exit"
                 or comment == "Stop Loss Short"
                 or comment == "Short SL"
@@ -521,7 +521,7 @@ def order_king_executer_xts(result, product_type="MIS"):
                     exchange_instrument_id=exchange_instrument_id
                 )
                 
-             elif (
+            elif (
                 comment == "Stop Loss Long Exit"
                 or comment == "Remaining Long Exit"
                 or comment == "Long SL"

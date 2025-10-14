@@ -112,8 +112,8 @@ Add one of the following entries based on your preference:
 
 #### Option B: Daily at 9:00 AM with email notifications
 ```bash
-MAILTO=your-email@example.com
-0 9 * * * /path/to/sha/refresh_xts_token.sh >> /path/to/sha/cron_output.log 2>&1
+MAILTO=shubh.arya37@gmail.com
+0 9 * * * /home/ubuntu/python-trading-bot/refresh_xts_token.sh >> /path/to/sha/cron_output.log 2>&1
 ```
 
 #### Option C: Multiple times per day (every 6 hours)
