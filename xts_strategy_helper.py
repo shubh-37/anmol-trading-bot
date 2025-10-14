@@ -290,15 +290,18 @@ def getting_strike(symbol, option_type, strike, exchnge, date):
 def cancel_orders_for_all():
     """Cancel all pending orders using XTS API"""
     global xts_token
-
+    # Need to add exchangeSegment and instrumentId in the request body
     try:
         url = f"{xts_api_root}/interactive/orders/cancelall"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
         }
+        request_body = {
+            "clientID": "*****"
+        }
 
-        response = requests.post(url, headers=headers, timeout=10)
+        response = requests.post(url, json=request_body, headers=headers, timeout=10)
         response.raise_for_status()
 
         result = response.json()
@@ -325,7 +328,7 @@ def cancel_single_order(symbol):
 
     try:
         # First get all orders
-        get_orders_url = f"{xts_api_root}/interactive/orders"
+        get_orders_url = f"{xts_api_root}interactive/orders/dealerorderbook?clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
@@ -354,11 +357,8 @@ def cancel_single_order(symbol):
         cancel_url = f"{xts_api_root}/interactive/orders/cancel"
         for order in symbol_orders:
             order_id = order.get("AppOrderID")
-            payload = {
-                "appOrderID": order_id
-            }
 
-            cancel_response = requests.post(cancel_url, json=payload, headers=headers, timeout=10)
+            cancel_response = requests.delete(cancel_url, json=order_id, headers=headers, timeout=10)
             print(cancel_response.json())
 
         send_telegram_message(f"✅ Cancelled {len(symbol_orders)} order(s) for {symbol}")
@@ -376,7 +376,7 @@ def exit_single_order(symbol):
 
     try:
         # Get positions
-        positions_url = f"{xts_api_root}/interactive/portfolio/positions?dayOrNet=DayWise"
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
@@ -410,7 +410,8 @@ def exit_single_order(symbol):
         cover_url = f"{xts_api_root}/interactive/orders/cover"
         payload = {
             "exchangeSegment": target_position.get("ExchangeSegment"),
-            "exchangeInstrumentID": target_position.get("ExchangeInstrumentId")
+            "exchangeInstrumentID": target_position.get("ExchangeInstrumentId"),
+            "clientID": "*****"
         }
 
         cover_response = requests.put(cover_url, json=payload, headers=headers, timeout=10)
@@ -438,7 +439,7 @@ def exit_all_order():
 
     try:
         # Get positions
-        positions_url = f"{xts_api_root}/interactive/portfolio/positions?dayOrNet=DayWise"
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
@@ -473,7 +474,8 @@ def exit_all_order():
         for position in open_positions:
             payload = {
                 "exchangeSegment": position.get("ExchangeSegment"),
-                "exchangeInstrumentID": position.get("ExchangeInstrumentId")
+                "exchangeInstrumentID": position.get("ExchangeInstrumentId"),
+                "clientID": "*****"
             }
 
             cover_response = requests.put(cover_url, json=payload, headers=headers, timeout=10)
@@ -531,7 +533,8 @@ def placing_market(symbol, qty, buy_sell, product_type, exchange_segment, exchan
             "orderQuantity": abs(int(qty)),
             "limitPrice": 0,
             "stopPrice": 0,
-            "orderUniqueIdentifier": f"XTS_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            "orderUniqueIdentifier": f"XTS_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "clientID": "*****"
         }
 
         print(f"Placing market order: {payload}")
@@ -547,6 +550,22 @@ def placing_market(symbol, qty, buy_sell, product_type, exchange_segment, exchan
         else:
             logger.error(f"Failed to place market order: {result}")
             send_telegram_message(f"❌ Failed to place market order for {symbol}: {result.get('description', 'Unknown error')}")
+
+        if result.get("type") == "success":
+            app_order_id = result.get("result", {}).get("AppOrderID", "N/A")
+            logger.info(f"Market order placed successfully for {symbol}, AppOrderID: {app_order_id}")
+            send_telegram_message(
+                f"✅ Market order placed for {symbol}\n"
+                f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
+                f"🔢 Order ID: {app_order_id}"
+               
+            )
+        else:
+            logger.error(f"Failed to place Market order: {result}")
+            send_telegram_message(
+                f"❌ Failed to place Market order for {symbol}\n"
+                f"Error: {result.get('description', 'Unknown error')}"
+             )
 
         return result
 
@@ -597,7 +616,8 @@ def placing_limit(symbol, qty, limit_price, buy_sell, order_type, product_type, 
             "orderQuantity": abs(int(qty)),
             "limitPrice": price,
             "stopPrice": 0,
-            "orderUniqueIdentifier": f"XTS_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            "orderUniqueIdentifier": f"XTS_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "clientID": "*****"
         }
 
         print(f"Placing {order_type} order: {payload}")
@@ -608,11 +628,19 @@ def placing_limit(symbol, qty, limit_price, buy_sell, order_type, product_type, 
         print(result)
 
         if result.get("type") == "success":
-            logger.info(f"{order_type} order placed successfully for {symbol}")
-            send_telegram_message(f"✅ {order_type} order placed for {symbol}: {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}")
+            app_order_id = result.get("result", {}).get("AppOrderID", "N/A")
+            logger.info(f"{order_type} order placed successfully for {symbol}, AppOrderID: {app_order_id}")
+            send_telegram_message(
+                f"✅ {order_type} order placed for {symbol}\n"
+                f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
+                f"🔢 Order ID: {app_order_id}"
+            )
         else:
             logger.error(f"Failed to place {order_type} order: {result}")
-            send_telegram_message(f"❌ Failed to place {order_type} order for {symbol}: {result.get('description', 'Unknown error')}")
+            send_telegram_message(
+                f"❌ Failed to place {order_type} order for {symbol}\n"
+                f"Error: {result.get('description', 'Unknown error')}"
+            )
 
         return result
 
@@ -638,18 +666,30 @@ def order_placement_buy_side(symbol, qty, limit_price, order_type, product_type,
     
     # Fetch positions from XTS
     try:
-        positions_url = f"{xts_api_root}/interactive/portfolio/positions?dayOrNet=DayWise"
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
         }
         
         response = requests.get(positions_url, headers=headers, timeout=10)
-        response.raise_for_status()
         positions_data = response.json()
         print(positions_data)
         
-    except Exception as e:
+        # Handle "Data Not Available" case (no positions)
+        if response.status_code == 400 and positions_data.get("code") == "e-portfolio-0005":
+            logger.info("No positions available. Proceeding with order placement.")
+            limit_price = float(limit_price)
+            cancel_single_order(symbol)
+            placing_limit(symbol, qty, limit_price, buy_sell="BUY", order_type=order_type,
+                         product_type=product_type, exchange_segment=exchange_segment,
+                         exchange_instrument_id=exchange_instrument_id)
+            return
+        
+        # Raise for other HTTP errors
+        response.raise_for_status()
+        
+    except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch positions: {e}")
         send_telegram_message(f"❌ Failed to fetch positions: {str(e)}")
         return None
@@ -732,18 +772,30 @@ def order_placement_sell_side(symbol, qty, limit_price, order_type, product_type
     
     # Fetch positions from XTS
     try:
-        positions_url = f"{xts_api_root}/interactive/portfolio/positions?dayOrNet=DayWise"
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
         }
         
         response = requests.get(positions_url, headers=headers, timeout=10)
-        response.raise_for_status()
         positions_data = response.json()
         print(positions_data)
         
-    except Exception as e:
+        # Handle "Data Not Available" case (no positions)
+        if response.status_code == 400 and positions_data.get("code") == "e-portfolio-0005":
+            logger.info("No positions available. Proceeding with order placement.")
+            limit_price = float(limit_price)
+            cancel_single_order(symbol)
+            placing_limit(symbol, qty, limit_price, buy_sell="SELL", order_type=order_type,
+                         product_type=product_type, exchange_segment=exchange_segment,
+                         exchange_instrument_id=exchange_instrument_id)
+            return
+        
+        # Raise for other HTTP errors
+        response.raise_for_status()
+        
+    except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch positions: {e}")
         send_telegram_message(f"❌ Failed to fetch positions: {str(e)}")
         return None
@@ -821,7 +873,7 @@ def exit_only_sell_trades(symbol, exchange_instrument_id=None):
     
     try:
         # Fetch positions from XTS
-        positions_url = f"{xts_api_root}/interactive/portfolio/positions?dayOrNet=DayWise"
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
@@ -884,7 +936,7 @@ def exit_only_buy_trades(symbol, exchange_instrument_id=None):
     
     try:
         # Fetch positions from XTS
-        positions_url = f"{xts_api_root}/interactive/portfolio/positions?dayOrNet=DayWise"
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
@@ -950,7 +1002,7 @@ def exit_half_position(symbol, match_qty, product_type, exchange_segment, exchan
     
     try:
         # Fetch positions from XTS
-        positions_url = f"{xts_api_root}/interactive/portfolio/positions?dayOrNet=DayWise"
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
