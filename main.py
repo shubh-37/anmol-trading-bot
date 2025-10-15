@@ -429,6 +429,7 @@ def order_king_executer(result):
                 or comment == "Short TP"
                 or comment == "Short BE"
                 or comment == "Short Exit"
+                or comment == "Close entry(s) order Short Entry"
             ):
                 exit_only_sell_trades(symbol=first_symbol)
             elif (
@@ -438,6 +439,7 @@ def order_king_executer(result):
                 or comment == "Long TP"
                 or comment == "Long BE"
                 or comment == "Long Exit"
+                or comment == "Close entry(s) order Long Entry"
             ):
                 exit_only_buy_trades(symbol=first_symbol)
 
