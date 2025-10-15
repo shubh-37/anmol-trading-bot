@@ -326,14 +326,15 @@ def cancel_single_order(symbol):
     """Cancel orders for a specific symbol using XTS API"""
     global xts_token
 
-    try:
-        # First get all orders
-        get_orders_url = f"{xts_api_root}interactive/orders/dealerorderbook?clientID=*****"
-        headers = {
-            "Authorization": xts_token,
-            "Content-Type": "application/json"
-        }
+    headers = {
+        "Authorization": xts_token,
+        "Content-Type": "application/json"
+    }
 
+    # First API call: Get all orders
+    try:
+        get_orders_url = f"{xts_api_root}/interactive/orders/dealerorderbook?clientID=*****"
+        
         response = requests.get(get_orders_url, headers=headers, timeout=10)
         response.raise_for_status()
 
@@ -344,16 +345,22 @@ def cancel_single_order(symbol):
             logger.warning(f"Failed to get orders: {orders_data}")
             return None
 
-        # Filter orders for the symbol that are pending/open
-        orders = orders_data.get("result", [])
-        symbol_orders = [order for order in orders if order.get("TradingSymbol") == symbol and order.get("OrderStatus") in ["Pending", "Open"]]
+    except Exception as e:
+        logger.error(f"Failed to get orders for {symbol}: {e}")
+        send_telegram_message(f"❌ Failed to get orders for {symbol}: {str(e)}")
+        return None
 
-        if not symbol_orders:
-            print(f"symbol {symbol} has no pending orders")
-            send_telegram_message(f"symbol {symbol} has no pending orders")
-            return None
+    # Filter orders for the symbol that are pending/open
+    orders = orders_data.get("result", [])
+    symbol_orders = [order for order in orders if order.get("TradingSymbol") == symbol and order.get("OrderStatus") in ["Pending", "Open"]]
 
-        # Cancel each order for this symbol
+    if not symbol_orders:
+        print(f"symbol {symbol} has no pending orders")
+        send_telegram_message(f"symbol {symbol} has no pending orders")
+        return None
+
+    # Second API call: Cancel orders
+    try:
         cancel_url = f"{xts_api_root}/interactive/orders/cancel"
         for order in symbol_orders:
             order_id = order.get("AppOrderID")
