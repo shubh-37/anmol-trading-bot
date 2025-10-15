@@ -552,7 +552,7 @@ def get_instrument_details(symbol, exchange):
         return None, None
 
         
-def order_king_executer_xts(result, product_type="MIS"):
+def order_king_executer_xts(result, product_type="NRML"):
     """
     Execute trading orders for XTS platform based on webhook data
     
@@ -955,7 +955,7 @@ def process_message_xts():
                     
                     # Execute trading logic for XTS
                     logger.info("Executing XTS trading order")
-                    order_king_executer_xts(parsed_data, product_type="MIS")
+                    order_king_executer_xts(parsed_data, product_type="NRML")
                     send_telegram_message("✅ XTS Trading order processed successfully", chat_id=TEST3_CHAT_ID)
                     
                 except Exception as e:
@@ -1032,7 +1032,7 @@ def process_message_xts():
                         send_telegram_message("⚠️ Warning: Failed to save trade data to CSV", chat_id=TEST3_CHAT_ID)
                     
                     logger.info("Executing XTS trading order")
-                    order_king_executer_xts(parsed_data, product_type="MIS")
+                    order_king_executer_xts(parsed_data, product_type="NRML")
                     send_telegram_message("✅ XTS Trading order processed successfully", chat_id=TEST3_CHAT_ID)
                     
                 except Exception as e:

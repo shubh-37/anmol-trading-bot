@@ -1036,7 +1036,7 @@ def exit_half_position(symbol, match_qty, product_type, exchange_segment, exchan
                 net_qty = int(position.get('Quantity', 0))
                 
                 # Get product type from position if not provided
-                position_product_type = product_type or position.get('ProductType', 'MIS')
+                position_product_type = product_type or position.get('ProductType', 'NRML')
                 
                 if abs(net_qty) > match_qty:
                     if net_qty > 0:  # Buy side position (positive quantity)
