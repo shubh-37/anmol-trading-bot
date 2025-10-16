@@ -377,11 +377,20 @@ def cancel_single_order(symbol):
         return None
 
 
-def exit_single_order(symbol):
-    """Exit position for a specific symbol using XTS API"""
+def exit_single_order(symbol, exchange_instrument_id=None, product_type="NRML"):
+    """
+    Exit position for a specific symbol using XTS Square-off API
+    
+    Args:
+        symbol: Trading symbol to exit
+        exchange_instrument_id: Optional instrument ID for precise matching
+        product_type: Product type (NRML, MIS, CNC) - default NRML
+    """
     global xts_token
 
     try:
+        print(f"=== Starting exit for symbol: {symbol} ===")
+        
         # Get positions
         positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
@@ -393,60 +402,151 @@ def exit_single_order(symbol):
         response.raise_for_status()
 
         positions_data = response.json()
-        print(positions_data)
+        print(f"Positions data: {positions_data}")
 
         if positions_data.get("type") != "success":
             logger.warning(f"Failed to get positions: {positions_data}")
+            send_telegram_message(
+                f"⚠️ Failed to get positions for {symbol}"
+            )
             return None
 
         positions = positions_data.get("result", {}).get("positionList", [])
 
+        if not positions:
+            print("No positions found")
+            send_telegram_message("ℹ️ No open positions found")
+            return None
+
         # Find position for this symbol
         target_position = None
+        exchange_instrument_id_str = str(exchange_instrument_id) if exchange_instrument_id else None
+        
         for position in positions:
-            if position.get("TradingSymbol") == symbol and position.get("Quantity") != 0:
+            position_instrument_id = str(position.get("ExchangeInstrumentId", ""))
+            position_symbol = position.get("TradingSymbol", "")
+            position_qty = int(position.get("Quantity", 0))
+            
+            # Match by instrument ID (preferred) or symbol name
+            match_found = False
+            if exchange_instrument_id_str and position_instrument_id == exchange_instrument_id_str:
+                match_found = True
+                print(f"✓ Matched by ExchangeInstrumentId: {position_instrument_id}")
+            elif position_symbol == symbol:
+                match_found = True
+                print(f"✓ Matched by TradingSymbol: {symbol}")
+            
+            if match_found and position_qty != 0:
                 target_position = position
+                print(f"Found position: {position_symbol}, Qty: {position_qty}")
                 break
 
         if not target_position:
-            print(f"No open position found for symbol: {symbol}")
-            send_telegram_message(f"No open position found for symbol: {symbol}")
+            msg = f"No open position found for symbol: {symbol}"
+            if exchange_instrument_id_str:
+                msg += f" (ID: {exchange_instrument_id_str})"
+            print(msg)
+            send_telegram_message(f"ℹ️ {msg}")
             return None
 
-        # Exit the position using cover order
-        cover_url = f"{xts_api_root}/interactive/orders/cover"
+        # Extract position details
+        exchange_segment = target_position.get("ExchangeSegment")
+        instrument_id = target_position.get("ExchangeInstrumentId")
+        trading_symbol = target_position.get("TradingSymbol")
+        position_qty = int(target_position.get("Quantity", 0))
+        position_product_type = target_position.get("ProductType", product_type)
+        
+        # Calculate absolute quantity to square off
+        squareoff_qty = abs(position_qty)
+        
+        print(f"Position details:")
+        print(f"  Symbol: {trading_symbol}")
+        print(f"  Exchange Segment: {exchange_segment}")
+        print(f"  Instrument ID: {instrument_id}")
+        print(f"  Current Quantity: {position_qty}")
+        print(f"  Square-off Quantity: {squareoff_qty}")
+        print(f"  Product Type: {position_product_type}")
+
+        # Exit the position using square-off API
+        squareoff_url = f"{xts_api_root}/interactive/portfolio/squareoff"
+        
         payload = {
-            "exchangeSegment": target_position.get("ExchangeSegment"),
-            "exchangeInstrumentID": target_position.get("ExchangeInstrumentId"),
-            "clientID": "*****"
+            "exchangeSegment": exchange_segment,
+            "exchangeInstrumentID": int(instrument_id),  # Ensure it's an integer
+            "productType": position_product_type,
+            "squareoffMode": "DayWise",
+            "squareOffQtyValue": squareoff_qty,
+            "clientID": "*****",
+            "positionSquareOffQuantityType": "ExactQty"
         }
+        
+        print(f"Square-off request payload: {payload}")
+        
+        # Send PUT request
+        squareoff_response = requests.put(
+            squareoff_url, 
+            json=payload, 
+            headers=headers, 
+            timeout=10
+        )
+        squareoff_result = squareoff_response.json()
+        
+        print(f"Square-off response: {squareoff_result}")
 
-        cover_response = requests.put(cover_url, json=payload, headers=headers, timeout=10)
-        cover_result = cover_response.json()
-        print(cover_result)
-
-        if cover_result.get("type") == "success":
-            print(f"Successfully closed position for symbol: {symbol}")
-            send_telegram_message(f"✅ Successfully closed position for symbol: {symbol}")
+        if squareoff_result.get("type") == "success":
+            success_msg = (
+                f"✅ Successfully squared off position:\n"
+                f"Symbol: {trading_symbol}\n"
+                f"Quantity: {position_qty}\n"
+                f"Squared off: {squareoff_qty} units"
+            )
+            print(success_msg)
+            send_telegram_message(success_msg)
+            
+            # Log the order ID if available
+            result_data = squareoff_result.get("result", {})
+            if isinstance(result_data, dict):
+                order_id = result_data.get("AppOrderID") or result_data.get("OrderID")
+                if order_id:
+                    print(f"Order ID: {order_id}")
         else:
-            print(f"Failed to close position for symbol: {symbol}")
-            send_telegram_message(f"❌ Failed to close position for symbol: {symbol} - {cover_result.get('description', 'Unknown error')}")
+            error_desc = squareoff_result.get("description", "Unknown error")
+            error_msg = (
+                f"❌ Failed to square off position:\n"
+                f"Symbol: {trading_symbol}\n"
+                f"Error: {error_desc}"
+            )
+            print(error_msg)
+            send_telegram_message(error_msg)
 
-        return cover_result
+        return squareoff_result
 
+    except requests.exceptions.RequestException as e:
+        error_msg = f"❌ Network error while exiting {symbol}: {str(e)}"
+        logger.error(error_msg)
+        send_telegram_message(error_msg)
+        return None
     except Exception as e:
-        logger.error(f"Failed to exit position for {symbol}: {e}")
-        send_telegram_message(f"❌ Failed to exit position for {symbol}: {str(e)}")
+        error_msg = f"❌ Failed to exit position for {symbol}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        send_telegram_message(error_msg)
         return None
 
-
-def exit_all_order():
-    """Exit all open positions using XTS API"""
+def exit_all_positions(product_type="NRML", square_off_mode="NetWise"):
+    """
+    Exit all open positions using XTS Square-off All API
+    
+    Args:
+        product_type: Product type filter (currently not used with bulk API)
+        square_off_mode: "DayWise" or "NetWise" (default: DayWise)
+    """
     global xts_token
 
     try:
-        # Get positions
-        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
+        print("=== Starting exit all positions (Bulk API) ===")
+        
+        # First, get current positions to show what will be closed
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=NetWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
             "Content-Type": "application/json"
@@ -456,58 +556,113 @@ def exit_all_order():
         response.raise_for_status()
 
         positions_data = response.json()
-        print(positions_data)
 
         if positions_data.get("type") != "success":
             logger.warning(f"Failed to get positions: {positions_data}")
-            send_telegram_message(f"❌ Failed to get positions")
+            send_telegram_message("⚠️ Failed to get positions")
             return None
 
         positions = positions_data.get("result", {}).get("positionList", [])
 
         # Filter positions with non-zero quantity
-        open_positions = [pos for pos in positions if pos.get("Quantity") != 0]
+        active_positions = [
+            pos for pos in positions 
+            if int(pos.get("Quantity", 0)) != 0
+        ]
 
-        if not open_positions:
-            print("No open positions to exit")
-            send_telegram_message("No open positions to exit")
+        if not active_positions:
+            msg = "No open positions to exit"
+            print(msg)
+            send_telegram_message(f"ℹ️ {msg}")
             return None
 
-        # Exit each position
-        cover_url = f"{xts_api_root}/interactive/orders/cover"
-        success_count = 0
-        fail_count = 0
+        # Log positions that will be closed
+        print(f"Found {len(active_positions)} positions to exit:")
+        position_summary = []
+        for pos in active_positions:
+            trading_symbol = pos.get("TradingSymbol")
+            quantity = pos.get("Quantity")
+            pos_product = pos.get("ProductType")
+            position_summary.append(f"  • {trading_symbol}: {quantity} ({pos_product})")
+            print(f"  - {trading_symbol}: {quantity} units ({pos_product})")
 
-        for position in open_positions:
-            payload = {
-                "exchangeSegment": position.get("ExchangeSegment"),
-                "exchangeInstrumentID": position.get("ExchangeInstrumentId"),
-                "clientID": "*****"
-            }
+        # Send notification about positions to be closed
+        positions_list = "\n".join(position_summary[:10])  # Limit to first 10 for Telegram
+        if len(active_positions) > 10:
+            positions_list += f"\n  ... and {len(active_positions) - 10} more"
+        
+        send_telegram_message(
+            f"🔄 Exiting {len(active_positions)} positions:\n{positions_list}"
+        )
 
-            cover_response = requests.put(cover_url, json=payload, headers=headers, timeout=10)
-            cover_result = cover_response.json()
-            print(cover_result)
+        # Use the bulk square-off API
+        squareoff_all_url = f"{xts_api_root}/interactive/portfolio/squareoffall"
+        
+        payload = {
+            "squareoffMode": square_off_mode,  # "DayWise" or "NetWise"
+            "clientID": "*****"
+        }
+        
+        print(f"Square-off all request payload: {payload}")
+        
+        # Send PUT request to square off all positions
+        squareoff_response = requests.put(
+            squareoff_all_url, 
+            json=payload, 
+            headers=headers, 
+            timeout=10
+        )
+        
+        squareoff_result = squareoff_response.json()
+        print(f"Square-off all response: {squareoff_result}")
 
-            if cover_result.get("type") == "success":
-                success_count += 1
-            else:
-                fail_count += 1
+        if squareoff_result.get("type") == "success":
+            success_msg = (
+                f"✅ Successfully squared off ALL positions!\n"
+                f"Total positions closed: {len(active_positions)}\n"
+                f"Mode: {square_off_mode}"
+            )
+            print(success_msg)
+            send_telegram_message(success_msg)
+            
+            # Log result details if available
+            result_data = squareoff_result.get("result", {})
+            if result_data:
+                print(f"Square-off result details: {result_data}")
+                
+                # If the API returns order IDs or other details
+                if isinstance(result_data, dict):
+                    order_ids = result_data.get("orderIDs", [])
+                    if order_ids:
+                        print(f"Order IDs: {order_ids}")
+                elif isinstance(result_data, list):
+                    print(f"Closed {len(result_data)} positions")
+            
+            return squareoff_result
+            
+        else:
+            error_desc = squareoff_result.get("description", "Unknown error")
+            error_code = squareoff_result.get("code", "")
+            error_msg = (
+                f"❌ Failed to square off all positions:\n"
+                f"Error: {error_desc}\n"
+                f"Code: {error_code}"
+            )
+            print(error_msg)
+            send_telegram_message(error_msg)
+            
+            return squareoff_result
 
-        message = f"✅ Exited {success_count} positions"
-        if fail_count > 0:
-            message += f", ❌ Failed to exit {fail_count} positions"
-
-        print(message)
-        send_telegram_message(message)
-
-        return {"success": success_count, "failed": fail_count}
-
-    except Exception as e:
-        logger.error(f"Failed to exit all positions: {e}")
-        send_telegram_message(f"❌ Failed to exit all positions: {str(e)}")
+    except requests.exceptions.RequestException as e:
+        error_msg = f"❌ Network error during bulk exit: {str(e)}"
+        logger.error(error_msg)
+        send_telegram_message(error_msg)
         return None
-
+    except Exception as e:
+        error_msg = f"❌ Failed to exit all positions (bulk): {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        send_telegram_message(error_msg)
+        return None
 
 def placing_market(symbol, qty, buy_sell, product_type, exchange_segment, exchange_instrument_id):
     """Place market order using XTS API
@@ -877,6 +1032,9 @@ def exit_only_sell_trades(symbol, exchange_instrument_id=None):
         exchange_instrument_id: Optional exchange instrument ID for more precise matching
     """
     global xts_token
+    print('Executing for symbol: ', symbol)
+    print('Exchange instrument id: ', exchange_instrument_id)
+    print('Exchange instrument id type: ', type(exchange_instrument_id))
     
     try:
         # Fetch positions from XTS
@@ -893,41 +1051,77 @@ def exit_only_sell_trades(symbol, exchange_instrument_id=None):
         
         if positions_data.get("type") != "success":
             logger.warning("Failed to get positions data")
+            send_telegram_message("⚠️ Failed to get positions data")
             return None
         
         position_list = positions_data.get("result", {}).get("positionList", [])
         
         if not position_list:
             print("No active positions.")
+            send_telegram_message("ℹ️ No active positions found")
             return None
+            
+        print('Position list: ', position_list)
+        
+        # Convert exchange_instrument_id to string for comparison
+        exchange_instrument_id_str = str(exchange_instrument_id) if exchange_instrument_id else None
         
         # Check if symbol exists in positions
         for position in position_list:
-            symbol_match = position.get('TradingSymbol') == symbol
-            if exchange_instrument_id:
-                symbol_match = symbol_match or position.get('ExchangeInstrumentId') == exchange_instrument_id
+            position_instrument_id = str(position.get('ExchangeInstrumentId', ''))
+            
+            print(f'Comparing: position[{position_instrument_id}] vs target[{exchange_instrument_id_str}]')
+            
+            # Match by ExchangeInstrumentId (preferred) or TradingSymbol (fallback)
+            symbol_match = False
+            if exchange_instrument_id_str and position_instrument_id == exchange_instrument_id_str:
+                symbol_match = True
+                print(f'✓ Matched by ExchangeInstrumentId: {position_instrument_id}')
+            elif position.get('TradingSymbol') == symbol:
+                symbol_match = True
+                print(f'✓ Matched by TradingSymbol: {symbol}')
+            
+            print('Symbol match: ', symbol_match)
             
             if symbol_match:
                 net_qty = int(position.get('Quantity', 0))
+                trading_symbol = position.get('TradingSymbol', symbol)
+                
+                print(f'Net quantity: {net_qty}')
                 
                 if net_qty != 0:
                     if net_qty < 0:  # Sell side position (negative quantity)
-                        print(f"Sell side position open for {symbol}. Exiting sell trade.")
-                        exit_single_order(symbol)
-                        send_telegram_message(f"✅ Exited sell side position for {symbol}")
+                        print(f"Sell side position open for {trading_symbol}. Exiting sell trade.")
+                        send_telegram_message(
+                            f"🔄 Exiting SELL position:\n"
+                            f"Symbol: {trading_symbol}\n"
+                            f"Quantity: {net_qty}\n"
+                            f"Instrument ID: {position_instrument_id}"
+                        )
+                        exit_single_order(trading_symbol)
+                        send_telegram_message(f"✅ Exited sell side position for {trading_symbol}")
                         return True
                     else:
-                        print(f"Buy side position open for {symbol}. Not a sell trade, skipping.")
+                        print(f"Buy side position open for {trading_symbol}. Not a sell trade, skipping.")
+                        send_telegram_message(
+                            f"ℹ️ Buy side position found for {trading_symbol} (Qty: {net_qty}). Not exiting.",
+                        )
                         return False
                 else:
-                    print(f"Position quantity is 0 for {symbol}.")
+                    print(f"Position quantity is 0 for {trading_symbol}.")
+                    send_telegram_message(f"ℹ️ Position quantity is 0 for {trading_symbol}")
                     return False
         
-        print(f"No position found for symbol: {symbol}")
+        print(f"No position found for symbol: {symbol} (ID: {exchange_instrument_id_str})")
+        send_telegram_message(
+            f"ℹ️ No matching position found:\n"
+            f"Symbol: {symbol}\n"
+            f"Instrument ID: {exchange_instrument_id_str}",
+        )
         return False
         
     except Exception as e:
-        logger.error(f"Failed to exit sell trades for {symbol}: {e}")
+        logger.error(f"Failed to exit sell trades for {symbol}: {e}", exc_info=True)
         send_telegram_message(f"❌ Failed to exit sell trades for {symbol}: {str(e)}")
         return None
 
