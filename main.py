@@ -560,158 +560,205 @@ def order_king_executer_xts(result, product_type="NRML"):
         result: Parsed webhook data dictionary
         product_type: Product type for orders - "MIS", "NRML", or "CNC" (default: "MIS")
     """
-    if result:
-        print(result)
-        logging.debug(f"result data: {result}")
-        exchange = result["exchange"]
-        main_symbol = result["symbol"]
-        buyfut = int(result["buyfut"])
-        new_strategy_position = int(result["new_strategy_position"])
-        comment = result["comment"]
-        open_price = float(result["open_price"])
-        order_type = result["order_type"]
+    if not result:
+        print("Message ignored due to missing keywords.")
+        send_telegram_message("⚠️ Message ignored due to missing keywords.", chat_id=TEST3_CHAT_ID)
+        return
         
-        print("Extracted Values:")
-        print("Symbol:", main_symbol)
-        print("New Strategy Position:", new_strategy_position)
-        print("Comment:", comment)
-        print("Open Price:", open_price)
-        print("Exchange:", exchange)
-        
-        logging.debug(f"buyfut data: {buyfut}, type: {type(buyfut)}")
-        
-        # Get symbol and lot size
-        if buyfut == 1:
-            print(f"Symbol: {main_symbol} -> use future chart for this")
-            first_symbol, first_symbol_lot = get_future_name(
-                symbol=main_symbol, exchange=exchange
+    print(result)
+    logging.debug(f"result data: {result}")
+    exchange = result["exchange"]
+    main_symbol = result["symbol"]
+    buyfut = int(result["buyfut"])
+    new_strategy_position = int(result["new_strategy_position"])
+    comment = result["comment"]
+    open_price = float(result["open_price"])
+    order_type = result["order_type"]
+    
+    print("Extracted Values:")
+    print("Symbol:", main_symbol)
+    print("New Strategy Position:", new_strategy_position)
+    print("Comment:", comment)
+    print("Open Price:", open_price)
+    print("Exchange:", exchange)
+    
+    logging.debug(f"buyfut data: {buyfut}, type: {type(buyfut)}")
+    
+    # Get symbol and lot size
+    if buyfut == 1:
+        print(f"Symbol: {main_symbol} -> use future chart for this")
+        first_symbol, first_symbol_lot = get_future_name(
+            symbol=main_symbol, exchange=exchange
+        )
+    else:
+        ext_value = extract_option_details(main_symbol)
+        if ext_value:
+            main_symbol = ext_value["main_symbol"]
+            date = ext_value["date"]
+            option_type = ext_value["option_type"]
+            strike = ext_value["strike"]
+            (
+                first_symbol,
+                first_main_symbol,
+                first_symbol_lot,
+                first_expiry_date,
+                main_ss,
+            ) = getting_strike(
+                symbol=main_symbol,
+                option_type=option_type,
+                strike=strike,
+                exchnge=exchange,
+                date=date,
             )
         else:
-            ext_value = extract_option_details(main_symbol)
-            if ext_value:
-                main_symbol = ext_value["main_symbol"]
-                date = ext_value["date"]
-                option_type = ext_value["option_type"]
-                strike = ext_value["strike"]
-                (
-                    first_symbol,
-                    first_main_symbol,
-                    first_symbol_lot,
-                    first_expiry_date,
-                    main_ss,
-                ) = getting_strike(
-                    symbol=main_symbol,
-                    option_type=option_type,
-                    strike=strike,
-                    exchnge=exchange,
-                    date=date,
-                )
-            else:
-                print("tradingview symbol not found")
-                send_telegram_message("❌ TradingView symbol not found",chat_id=TEST3_CHAT_ID)
-                return
+            print("tradingview symbol not found")
+            send_telegram_message("❌ TradingView symbol not found", chat_id=TEST3_CHAT_ID)
+            return
+    
+    print(first_symbol, first_symbol_lot)
+    
+    if first_symbol is None:
+        send_telegram_message("❌ First symbol is None - cannot proceed", chat_id=TEST3_CHAT_ID)
+        return
+    
+    first_symbol = str(first_symbol)
+    first_symbol_lot = int(first_symbol_lot)
+    new_strategy_position = first_symbol_lot * new_strategy_position
+    
+    # Get exchange segment and instrument ID for XTS
+    exchange_segment, exchange_instrument_id = get_instrument_details(first_symbol, exchange)
+    
+    if exchange_segment is None or exchange_instrument_id is None:
+        error_msg = f"❌ Could not get instrument details for {first_symbol}"
+        print(error_msg)
+        send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+        return
+    
+    print(f"XTS Details - Segment: {exchange_segment}, Instrument ID: {exchange_instrument_id}, Product: {product_type}")
+    
+    # Execute trading logic based on comment
+    try:
+        # Normalize comment for comparison
+        comment_normalized = comment.strip()
         
-        print(first_symbol, first_symbol_lot)
-        
-        if first_symbol is None:
-            send_telegram_message("❌ First symbol is None - cannot proceed",chat_id=TEST3_CHAT_ID)
+        # Exit all positions
+        if comment_normalized == "exit all":
+            print("Exit all positions called")
+            send_telegram_message(f"🔄 Executing: Exit all positions for {first_symbol}", chat_id=TEST3_CHAT_ID)
+            exit_single_order(first_symbol)
             return
         
-        first_symbol = str(first_symbol)
-        first_symbol_lot = int(first_symbol_lot)
-        new_strategy_position = first_symbol_lot * new_strategy_position
+        # Short exit conditions
+        short_exit_comments = [
+            "Remaining Short Exit",
+            "Stop Loss Short",
+            "Short SL",
+            "Short TP",
+            "Short BE",
+            "Short Exit",
+            "Close entry(s) order Short Entry"
+        ]
         
-        # Get exchange segment and instrument ID for XTS
-        exchange_segment, exchange_instrument_id = get_instrument_details(first_symbol, exchange)
-        
-        if exchange_segment is None or exchange_instrument_id is None:
-            error_msg = f"❌ Could not get instrument details for {first_symbol}"
-            print(error_msg)
-            send_telegram_message(error_msg,chat_id=TEST3_CHAT_ID)
+        if comment_normalized in short_exit_comments:
+            print(f"Short exit called for comment: {comment_normalized}")
+            send_telegram_message(
+                f"🔄 Executing: Exit SHORT trades for {first_symbol}\nComment: {comment_normalized}",
+                chat_id=TEST3_CHAT_ID
+            )
+            exit_only_sell_trades(
+                symbol=first_symbol,
+                exchange_instrument_id=exchange_instrument_id
+            )
+            send_telegram_message(f"✅ SHORT exit completed for {first_symbol}", chat_id=TEST3_CHAT_ID)
             return
         
-        print(f"XTS Details - Segment: {exchange_segment}, Instrument ID: {exchange_instrument_id}, Product: {product_type}")
+        # Long exit conditions
+        long_exit_comments = [
+            "Stop Loss Long Exit",
+            "Remaining Long Exit",
+            "Long SL",
+            "Long TP",
+            "Long BE",
+            "Long Exit",
+            "Close entry(s) order Long Entry"
+        ]
         
-        # Execute trading logic based on comment
-        try:
-            if comment == "exit all ":
-                print("exit single order called")
-                exit_single_order(first_symbol)
-                
-            elif (
-                comment == "Remaining Short Exit"
-                or comment == "Stop Loss Short"
-                or comment == "Short SL"
-                or comment == "Short TP"
-                or comment == "Short BE"
-                or comment == "Short Exit"
-                or comment == "Close entry(s) order Short Entry"
-            ):
-                exit_only_sell_trades(
-                    symbol=first_symbol,
-                    exchange_instrument_id=exchange_instrument_id
-                )
-                
-            elif (
-                comment == "Stop Loss Long Exit"
-                or comment == "Remaining Long Exit"
-                or comment == "Long SL"
-                or comment == "Long TP"
-                or comment == "Long BE"
-                or comment == "Long Exit"
-                or comment == "Close entry(s) order Long Entry"
-            ):
-                exit_only_buy_trades(
-                    symbol=first_symbol,
-                    exchange_instrument_id=exchange_instrument_id
-                )
-                
-            elif comment == "Short Entry":
-                print("short entry called")
-                order_placement_sell_side(
-                    symbol=first_symbol,
-                    qty=new_strategy_position,
-                    limit_price=open_price,
-                    order_type=order_type,
-                    product_type=product_type,
-                    exchange_segment=exchange_segment,
-                    exchange_instrument_id=exchange_instrument_id
-                )
-                
-            elif comment == "Long Entry":
-                print("long entry called")
-                order_placement_buy_side(
-                    symbol=first_symbol,
-                    qty=new_strategy_position,
-                    limit_price=open_price,
-                    order_type=order_type,
-                    product_type=product_type,
-                    exchange_segment=exchange_segment,
-                    exchange_instrument_id=exchange_instrument_id
-                )
-                
-            elif comment == "Exit fifty at two x" or comment == "long exit fifty at three x":
-                print("half qty exit thing called")
-                exit_half_position(
-                    symbol=first_symbol,
-                    match_qty=new_strategy_position,
-                    product_type=product_type,
-                    exchange_segment=exchange_segment,
-                    exchange_instrument_id=exchange_instrument_id
-                )
-                
-            else:
-                print("no condition satisfy")
-                send_telegram_message(f"⚠️ Unknown comment: {comment}",chat_id=TEST3_CHAT_ID)
-                
-        except Exception as e:
-            error_msg = f"❌ Error executing order: {str(e)}"
-            logger.error(error_msg)
-            send_telegram_message(error_msg,chat_id=TEST3_CHAT_ID)
-            
-    else:
-        print("Message ignored due to missing keywords.")
-        send_telegram_message("⚠️ Message ignored due to missing keywords.",chat_id=TEST3_CHAT_ID)
+        if comment_normalized in long_exit_comments:
+            print(f"Long exit called for comment: {comment_normalized}")
+            send_telegram_message(
+                f"🔄 Executing: Exit LONG trades for {first_symbol}\nComment: {comment_normalized}",
+                chat_id=TEST3_CHAT_ID
+            )
+            exit_only_buy_trades(
+                symbol=first_symbol,
+                exchange_instrument_id=exchange_instrument_id
+            )
+            send_telegram_message(f"✅ LONG exit completed for {first_symbol}", chat_id=TEST3_CHAT_ID)
+            return
+        
+        # Entry conditions
+        if comment_normalized == "Short Entry":
+            print("Short entry called")
+            send_telegram_message(
+                f"📉 Executing: SHORT entry for {first_symbol}\nQty: {new_strategy_position}\nPrice: {open_price}",
+                chat_id=TEST3_CHAT_ID
+            )
+            order_placement_sell_side(
+                symbol=first_symbol,
+                qty=new_strategy_position,
+                limit_price=open_price,
+                order_type=order_type,
+                product_type=product_type,
+                exchange_segment=exchange_segment,
+                exchange_instrument_id=exchange_instrument_id
+            )
+            return
+        
+        if comment_normalized == "Long Entry":
+            print("Long entry called")
+            send_telegram_message(
+                f"📈 Executing: LONG entry for {first_symbol}\nQty: {new_strategy_position}\nPrice: {open_price}",
+                chat_id=TEST3_CHAT_ID
+            )
+            order_placement_buy_side(
+                symbol=first_symbol,
+                qty=new_strategy_position,
+                limit_price=open_price,
+                order_type=order_type,
+                product_type=product_type,
+                exchange_segment=exchange_segment,
+                exchange_instrument_id=exchange_instrument_id
+            )
+            return
+        
+        # Partial exit conditions
+        partial_exit_comments = ["Exit fifty at two x", "long exit fifty at three x"]
+        
+        if comment_normalized in partial_exit_comments:
+            print("Half quantity exit called")
+            send_telegram_message(
+                f"🔄 Executing: 50% position exit for {first_symbol}\nTarget qty: {new_strategy_position}",
+                chat_id=TEST3_CHAT_ID
+            )
+            exit_half_position(
+                symbol=first_symbol,
+                match_qty=new_strategy_position,
+                product_type=product_type,
+                exchange_segment=exchange_segment,
+                exchange_instrument_id=exchange_instrument_id
+            )
+            send_telegram_message(f"✅ Partial exit completed for {first_symbol}", chat_id=TEST3_CHAT_ID)
+            return
+        
+        # No matching condition
+        print(f"No condition satisfied for comment: {comment_normalized}")
+        send_telegram_message(f"⚠️ Unknown comment received: {comment_normalized}", chat_id=TEST3_CHAT_ID)
+        
+    except Exception as e:
+        error_msg = f"❌ Error executing order: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+        raise  # Re-raise to trigger the outer exception handler
 
 
 @app.route("/", methods=["GET"])
@@ -913,7 +960,7 @@ def process_message_xts():
                     logger.info("[XTS] Exit all command received")
                     send_telegram_message("Executing exit all positions command (XTS)", chat_id=TEST3_CHAT_ID)
                     try:
-                        exit_all_order()
+                        exit_all_positions()
                         send_telegram_message("✅ Exit all positions completed", chat_id=TEST3_CHAT_ID)
                     except Exception as e:
                         logger.error(f"Failed to exit all positions: {e}")
@@ -998,7 +1045,7 @@ def process_message_xts():
                 logger.info("[XTS] Exit all command received")
                 send_telegram_message("Executing exit all positions command (XTS)", chat_id=TEST3_CHAT_ID)
                 try:
-                    exit_all_order()
+                    exit_all_positions()
                     send_telegram_message("✅ Exit all positions completed", chat_id=TEST3_CHAT_ID)
                 except Exception as e:
                     logger.error(f"Failed to exit all positions: {e}")
