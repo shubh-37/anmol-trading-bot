@@ -43,15 +43,17 @@ if not all([TOKEN_TELEGRAM, TEST3_CHAT_ID]):
 
 
 def save_to_csv(parsed_data):
-    """Save trading data to CSV with proper validation and error handling"""
+    """Save trading data to CSV with proper validation and error handling - NEW FORMAT"""
     try:
         # Input validation
         if not parsed_data or not isinstance(parsed_data, dict):
             raise ValueError("Invalid parsed_data provided")
 
+        # NEW: Updated required fields for new format
         required_fields = [
-            "exchange", "symbol", "buyfut", "new_strategy_position",
-            "comment", "open_price", "order_type", "time_utc", "time_ist", "interval"
+            "exchange", "symbol", "buyfut", "action",
+            "contracts", "position_size", "close_price", "order_type",
+            "time_utc", "time_ist"
         ]
 
         for field in required_fields:
@@ -72,30 +74,27 @@ def save_to_csv(parsed_data):
                 return ""
             return str(value).replace('\n', ' ').replace('\r', ' ')[:100]  # Limit length
 
-        # Extract and sanitize values
+        # Extract and sanitize values - NEW FORMAT
         row = [
             sanitize_value(parsed_data["exchange"]),
             sanitize_value(parsed_data["symbol"]),
             sanitize_value(parsed_data["buyfut"]),
-            sanitize_value(parsed_data["new_strategy_position"]),
-            sanitize_value(parsed_data["comment"]),
-            sanitize_value(parsed_data["open_price"]),
+            sanitize_value(parsed_data["action"]),
+            sanitize_value(parsed_data["contracts"]),
+            sanitize_value(parsed_data["position_size"]),
+            sanitize_value(parsed_data["close_price"]),
             sanitize_value(parsed_data["order_type"]),
             sanitize_value(parsed_data["time_utc"]),
             sanitize_value(parsed_data["time_ist"]),
-            sanitize_value(parsed_data["interval"]),
-            (
-                "approve"
-                if parsed_data["comment"] in ["Short Entry", "Long Entry"]
-                else "reject"
-            ),
+            sanitize_value(parsed_data.get("source", "")),
+            "pending"  # Default status
         ]
 
-        # Define the CSV headers
+        # Define the CSV headers - NEW FORMAT
         headers = [
-            "exchange", "symbol", "buyfut", "new_strategy_position",
-            "comment", "open_price", "order_type", "time_utc", "time_ist",
-            "interval", "status"
+            "exchange", "symbol", "buyfut", "action",
+            "contracts", "position_size", "close_price", "order_type",
+            "time_utc", "time_ist", "source", "status"
         ]
 
         # Write the row to the CSV file
@@ -141,56 +140,56 @@ def validate_json_payload(data):
     """Validate JSON payload structure"""
     if not isinstance(data, dict):
         raise ValueError("Payload must be a JSON object")
-    
+
     # Check for required top-level keys
     required_keys = ["strategy", "symbol", "price", "meta"]
     for key in required_keys:
         if key not in data:
             raise ValueError(f"Missing required key: {key}")
-    
-    # Validate strategy object
-    strategy_required = ["action", "contracts", "comment", "position_size"]
+
+    # Validate strategy object - NEW: removed 'comment', kept action, contracts, position_size
+    strategy_required = ["action", "contracts", "position_size"]
     for key in strategy_required:
         if key not in data["strategy"]:
             raise ValueError(f"Missing required strategy field: {key}")
-    
+
     # Validate symbol object
     symbol_required = ["exchange", "ticker"]
     for key in symbol_required:
         if key not in data["symbol"]:
             raise ValueError(f"Missing required symbol field: {key}")
-    
+
     # Validate price object
-    price_required = ["open"]
+    price_required = ["close"]
     for key in price_required:
         if key not in data["price"]:
             raise ValueError(f"Missing required price field: {key}")
-    
+
     # Validate meta object
     if "tag" not in data["meta"]:
         raise ValueError("Missing required meta field: tag")
-    
+
     return True
 
 
 def parse_json_message(json_data):
-    """Parse JSON trading message with proper validation and error handling"""
+    """Parse JSON trading message with proper validation and error handling - NEW FORMAT"""
     try:
         # Validate the payload structure
         validate_json_payload(json_data)
-        
+
         # Check if the tag contains "radhe algo"
         tag = json_data["meta"].get("tag", "").lower()
         if "radhe" not in tag or "algo" not in tag:
             logger.debug("Message does not contain required keywords in tag")
             return None
-        
+
         result = {}
-        
+
         # Extract exchange and symbol
         result["exchange"] = json_data["symbol"]["exchange"]
         symbol_raw = json_data["symbol"]["ticker"]
-        
+
         # Process the symbol to determine if it's futures
         # Check if symbol ends with ! or if it's explicitly marked
         if symbol_raw.endswith("!"):
@@ -200,44 +199,40 @@ def parse_json_message(json_data):
             # For options/other instruments
             result["symbol"] = symbol_raw
             result["buyfut"] = 0
-        
-        # Extract position: contracts * position_size
-        # contracts = quantity/lots to trade
-        # position_size = direction (1 for long, -1 for short) and multiplier
+
+        # NEW: Extract action (buy/sell), contracts, and position_size
+        result["action"] = json_data["strategy"]["action"].strip().lower()
+
         try:
-            contracts = int(json_data["strategy"]["contracts"])
-            position_size = int(json_data["strategy"]["position_size"])
-            result["new_strategy_position"] = contracts * position_size
+            result["contracts"] = int(json_data["strategy"]["contracts"])
+            result["position_size"] = int(json_data["strategy"]["position_size"])
         except (ValueError, TypeError):
             logger.error("Invalid contracts or position_size format")
             return None
-        
-        # Extract comment
-        result["comment"] = json_data["strategy"]["comment"].strip()[:100]
-        
-        # Extract open price
+
+        # Extract close price (this is what we'll use for order placement)
         try:
-            result["open_price"] = float(json_data["price"]["open"])
+            result["close_price"] = float(json_data["price"]["close"])
         except (ValueError, TypeError):
-            logger.error("Invalid open price format")
+            logger.error("Invalid close price format")
             return None
-        
-        # Extract order type (default to MARKET if not specified)
-        result["order_type"] = json_data["meta"].get("order_type", "MARKET").upper()
-        
+
+        # Extract order type (default to MKT if not specified)
+        result["order_type"] = json_data["meta"].get("order_type", "MKT").upper()
+
         # Handle time fields - use current time if not provided
         current_utc = datetime.datetime.utcnow()
         result["time_utc"] = current_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-        
+
         ist_time = current_utc + datetime.timedelta(hours=5, minutes=30)
         result["time_ist"] = ist_time.strftime("%Y-%m-%dT%H:%M:%S")
-        
-        # Extract interval (default to empty string if not provided)
-        result["interval"] = json_data["meta"].get("interval", "")
-        
+
+        # Extract source for tracking
+        result["source"] = json_data["meta"].get("source", "")
+
         logger.debug(f"Successfully parsed JSON message: {result}")
         return result
-        
+
     except ValueError as e:
         logger.error(f"Validation error in JSON message: {e}")
         return None
@@ -551,45 +546,48 @@ def get_instrument_details(symbol, exchange):
         logger.error(f"Error getting instrument details: {e}")
         return None, None
 
-        
 def order_king_executer_xts(result, product_type="NRML"):
     """
-    Execute trading orders for XTS platform based on webhook data
-    
-    Args:
-        result: Parsed webhook data dictionary
-        product_type: Product type for orders - "MIS", "NRML", or "CNC" (default: "MIS")
+    Execute trading orders for XTS platform based on webhook data - Simplified logic
+    Implemented per user's specified rules:
+      - position_size == 0 -> stoploss/close: only act if there is an existing net position; otherwise skip
+      - position_size != 0 -> treat as signed trade lots (positive buy, negative sell)
+      - identical repeated signals that wouldn't change net are ignored
     """
     if not result:
         print("Message ignored due to missing keywords.")
         send_telegram_message("⚠️ Message ignored due to missing keywords.", chat_id=TEST3_CHAT_ID)
         return
-        
+
     print(result)
     logging.debug(f"result data: {result}")
-    exchange = result["exchange"]
-    main_symbol = result["symbol"]
-    buyfut = int(result["buyfut"])
-    new_strategy_position = int(result["new_strategy_position"])
-    comment = result["comment"]
-    open_price = float(result["open_price"])
-    order_type = result["order_type"]
-    
-    print("Extracted Values:")
-    print("Symbol:", main_symbol)
-    print("New Strategy Position:", new_strategy_position)
-    print("Comment:", comment)
-    print("Open Price:", open_price)
-    print("Exchange:", exchange)
-    
-    logging.debug(f"buyfut data: {buyfut}, type: {type(buyfut)}")
-    
-    # Get symbol and lot size
+
+    # ---- Extract fields (expecting flat parsed payload) ----
+    exchange = result.get("exchange") or result.get("symbol", {}).get("exchange")
+    main_symbol = result.get("symbol") or result.get("symbol", {}).get("ticker")
+    buyfut = int(result.get("buyfut", 0))
+    # Note: action may be present but we use position_size to determine signed trade
+    # action_text = result.get("action", "").lower()
+    contracts = int(result.get("contracts", 0))
+    position_size = int(result.get("position_size", 0))  # signed lots from webhook
+    # Fallback to 'contracts' if position_size not provided
+    if "position_size" not in result and contracts != 0:
+        position_size = contracts
+    # price fields
+    close_price = float(result.get("close_price") or result.get("price", {}).get("close", 0.0))
+    order_type = result.get("order_type") or (result.get("meta") or {}).get("order_type", "MKT")
+
+    print("=== Extracted Values ===")
+    print(f"Symbol: {main_symbol}")
+    print(f"Contracts (raw): {contracts}")
+    print(f"Position Size (signed lots): {position_size}")
+    print(f"Close Price: {close_price}")
+    print(f"Order Type: {order_type}")
+    print(f"Exchange: {exchange}")
+
+    # ---- Resolve tradable symbol & lot size ----
     if buyfut == 1:
-        print(f"Symbol: {main_symbol} -> use future chart for this")
-        first_symbol, first_symbol_lot = get_future_name(
-            symbol=main_symbol, exchange=exchange
-        )
+        first_symbol, first_symbol_lot = get_future_name(symbol=main_symbol, exchange=exchange)
     else:
         ext_value = extract_option_details(main_symbol)
         if ext_value:
@@ -611,154 +609,342 @@ def order_king_executer_xts(result, product_type="NRML"):
                 date=date,
             )
         else:
-            print("tradingview symbol not found")
-            send_telegram_message("❌ TradingView symbol not found", chat_id=TEST3_CHAT_ID)
+            error_msg = "❌ TradingView symbol not found"
+            print(error_msg)
+            send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
             return
-    
-    print(first_symbol, first_symbol_lot)
-    
+
     if first_symbol is None:
-        send_telegram_message("❌ First symbol is None - cannot proceed", chat_id=TEST3_CHAT_ID)
+        error_msg = "❌ First symbol is None - cannot proceed"
+        print(error_msg)
+        send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
         return
-    
+
     first_symbol = str(first_symbol)
     first_symbol_lot = int(first_symbol_lot)
-    new_strategy_position = first_symbol_lot * new_strategy_position
-    
-    # Get exchange segment and instrument ID for XTS
+
+    # compute qty for incoming trade (lots -> units)
+    incoming_qty_units = abs(position_size) * first_symbol_lot
+
+    print(f"Trading Symbol: {first_symbol}")
+    print(f"Lot Size: {first_symbol_lot}")
+    print(f"Incoming trade (lots): {position_size}, units: {incoming_qty_units}")
+
+    # ---- Instrument details for XTS ----
     exchange_segment, exchange_instrument_id = get_instrument_details(first_symbol, exchange)
-    
     if exchange_segment is None or exchange_instrument_id is None:
         error_msg = f"❌ Could not get instrument details for {first_symbol}"
         print(error_msg)
         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
         return
-    
+
     print(f"XTS Details - Segment: {exchange_segment}, Instrument ID: {exchange_instrument_id}, Product: {product_type}")
-    
-    # Execute trading logic based on comment
+
+    # ---- Maintain local net positions by symbol (lots) ----
+    # NOTE: Persist this dict in production (file/DB) to survive restarts.
+    global current_net_positions
     try:
-        # Normalize comment for comparison
-        comment_normalized = comment.strip()
-        
-        # Exit all positions
-        if comment_normalized == "exit all":
-            print("Exit all positions called")
-            send_telegram_message(f"🔄 Executing: Exit all positions for {first_symbol}", chat_id=TEST3_CHAT_ID)
-            exit_single_order(first_symbol)
+        current_net_positions
+    except NameError:
+        current_net_positions = {}
+
+    # If available, try to get live XTS position (signed units) and convert to lots for truth
+    current_net_lots = current_net_positions.get(first_symbol, 0)  # signed lots
+    try:
+        # optional helper: if you have get_xts_position returning signed units, use it to correct local state
+        if "get_xts_position" in globals():
+            live_units = get_xts_position(first_symbol)  # expect signed units (positive long, negative short)
+            if live_units is not None:
+                # convert units -> lots (integer division)
+                live_lots = int(live_units // first_symbol_lot) if first_symbol_lot else 0
+                current_net_lots = live_lots
+                current_net_positions[first_symbol] = current_net_lots
+    except Exception as _e:
+        # ignore failures from live query and fall back to local state
+        logging.debug(f"get_xts_position failed: {_e}")
+
+    print(f"Current net (lots) for {first_symbol}: {current_net_lots}")
+
+    # ---- Core logic per your requested rules ----
+    try:
+        # 1) STOPLOSS / position_size == 0: close existing net positions if any, else ignore
+        if position_size == 0:
+            print("Received stoploss (position_size == 0) signal")
+            if current_net_lots == 0:
+                msg = f"⚠️ SKIPPING stoploss for {first_symbol} — no net position exists"
+                print(msg)
+                send_telegram_message(msg, chat_id=TEST3_CHAT_ID)
+                return
+            else:
+                # Close entire net position by placing opposite-side order
+                close_side = "BUY" if current_net_lots < 0 else "SELL"
+                qty_to_close = abs(current_net_lots) * first_symbol_lot
+                print(f"Closing existing net for {first_symbol}: side={close_side}, qty={qty_to_close}")
+                send_telegram_message(
+                    f"📛 Closing net position for {first_symbol}\n"
+                    f"Side: {close_side}\nQty: {qty_to_close}\nPrice: {close_price}\nType: {order_type}",
+                    chat_id=TEST3_CHAT_ID,
+                )
+
+                place_market_order(
+                    symbol=first_symbol,
+                    qty=qty_to_close,
+                    limit_price=close_price,
+                    order_type=order_type,
+                    buy_sell=close_side,
+                    product_type=product_type,
+                    exchange_segment=exchange_segment,
+                    exchange_instrument_id=exchange_instrument_id,
+                )
+
+                # update local net to zero
+                current_net_positions[first_symbol] = 0
+                print(f"Net for {first_symbol} set to 0 after closing.")
+                return
+
+        # 2) Non-zero position_size: treat as signed trade lots to execute
+        # If incoming instruction equals current net exactly — ignore (duplicate)
+        if position_size == current_net_lots:
+            msg = f"⚖️ Ignored: incoming position_size ({position_size}) equals current net ({current_net_lots}) for {first_symbol}"
+            print(msg)
+            send_telegram_message(msg, chat_id=TEST3_CHAT_ID)
             return
-        
-        # Short exit conditions
-        short_exit_comments = [
-            "Remaining Short Exit",
-            "Stop Loss Short",
-            "Short SL",
-            "Short TP",
-            "Short BE",
-            "Short Exit",
-            "Close entry(s) order Short Entry"
-        ]
-        
-        if comment_normalized in short_exit_comments:
-            print(f"Short exit called for comment: {comment_normalized}")
-            send_telegram_message(
-                f"🔄 Executing: Exit SHORT trades for {first_symbol}\nComment: {comment_normalized}",
-                chat_id=TEST3_CHAT_ID
-            )
-            exit_only_sell_trades(
-                symbol=first_symbol,
-                exchange_instrument_id=exchange_instrument_id
-            )
-            send_telegram_message(f"✅ SHORT exit completed for {first_symbol}", chat_id=TEST3_CHAT_ID)
-            return
-        
-        # Long exit conditions
-        long_exit_comments = [
-            "Stop Loss Long Exit",
-            "Remaining Long Exit",
-            "Long SL",
-            "Long TP",
-            "Long BE",
-            "Long Exit",
-            "Close entry(s) order Long Entry"
-        ]
-        
-        if comment_normalized in long_exit_comments:
-            print(f"Long exit called for comment: {comment_normalized}")
-            send_telegram_message(
-                f"🔄 Executing: Exit LONG trades for {first_symbol}\nComment: {comment_normalized}",
-                chat_id=TEST3_CHAT_ID
-            )
-            exit_only_buy_trades(
-                symbol=first_symbol,
-                exchange_instrument_id=exchange_instrument_id
-            )
-            send_telegram_message(f"✅ LONG exit completed for {first_symbol}", chat_id=TEST3_CHAT_ID)
-            return
-        
-        # Entry conditions
-        if comment_normalized == "Short Entry":
-            print("Short entry called")
-            send_telegram_message(
-                f"📉 Executing: SHORT entry for {first_symbol}\nQty: {new_strategy_position}\nPrice: {open_price}",
-                chat_id=TEST3_CHAT_ID
-            )
-            order_placement_sell_side(
-                symbol=first_symbol,
-                qty=new_strategy_position,
-                limit_price=open_price,
-                order_type=order_type,
-                product_type=product_type,
-                exchange_segment=exchange_segment,
-                exchange_instrument_id=exchange_instrument_id
-            )
-            return
-        
-        if comment_normalized == "Long Entry":
-            print("Long entry called")
-            send_telegram_message(
-                f"📈 Executing: LONG entry for {first_symbol}\nQty: {new_strategy_position}\nPrice: {open_price}",
-                chat_id=TEST3_CHAT_ID
-            )
-            order_placement_buy_side(
-                symbol=first_symbol,
-                qty=new_strategy_position,
-                limit_price=open_price,
-                order_type=order_type,
-                product_type=product_type,
-                exchange_segment=exchange_segment,
-                exchange_instrument_id=exchange_instrument_id
-            )
-            return
-        
-        # Partial exit conditions
-        partial_exit_comments = ["Exit fifty at two x", "long exit fifty at three x"]
-        
-        if comment_normalized in partial_exit_comments:
-            print("Half quantity exit called")
-            send_telegram_message(
-                f"🔄 Executing: 50% position exit for {first_symbol}\nTarget qty: {new_strategy_position}",
-                chat_id=TEST3_CHAT_ID
-            )
-            exit_half_position(
-                symbol=first_symbol,
-                match_qty=new_strategy_position,
-                product_type=product_type,
-                exchange_segment=exchange_segment,
-                exchange_instrument_id=exchange_instrument_id
-            )
-            send_telegram_message(f"✅ Partial exit completed for {first_symbol}", chat_id=TEST3_CHAT_ID)
-            return
-        
-        # No matching condition
-        print(f"No condition satisfied for comment: {comment_normalized}")
-        send_telegram_message(f"⚠️ Unknown comment received: {comment_normalized}", chat_id=TEST3_CHAT_ID)
-        
+
+        # Otherwise execute the incoming trade exactly as specified (signed lots)
+        trade_side = "BUY" if position_size > 0 else "SELL"
+        trade_qty_units = abs(position_size) * first_symbol_lot
+
+        print(f"Executing trade for {first_symbol}: side={trade_side}, units={trade_qty_units}")
+        send_telegram_message(
+            f"🚀 Executing trade for {first_symbol}\n"
+            f"Side: {trade_side}\n"
+            f"Lots: {position_size}\n"
+            f"Units: {trade_qty_units}\n"
+            f"Price: {close_price}\n"
+            f"Order Type: {order_type}",
+            chat_id=TEST3_CHAT_ID,
+        )
+
+        place_market_order(
+            symbol=first_symbol,
+            qty=trade_qty_units,
+            limit_price=close_price,
+            order_type=order_type,
+            buy_sell=trade_side,
+            product_type=product_type,
+            exchange_segment=exchange_segment,
+            exchange_instrument_id=exchange_instrument_id,
+        )
+
+        # Update local net position by adding the signed lots (position_size)
+        new_net = current_net_lots + position_size
+        current_net_positions[first_symbol] = new_net
+        print(f"Updated net for {first_symbol}: {current_net_lots} -> {new_net}")
+        return
+
     except Exception as e:
         error_msg = f"❌ Error executing order: {str(e)}"
         logger.error(error_msg, exc_info=True)
         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
-        raise  # Re-raise to trigger the outer exception handler
+        raise
+
+        
+# def order_king_executer_xts(result, product_type="NRML"):
+#     """
+#     Execute trading orders for XTS platform based on webhook data - NEW SIMPLIFIED LOGIC
+
+#     Args:
+#         result: Parsed webhook data dictionary with action, contracts, position_size
+#         product_type: Product type for orders - "MIS", "NRML", or "CNC" (default: "NRML")
+#     """
+#     if not result:
+#         print("Message ignored due to missing keywords.")
+#         send_telegram_message("⚠️ Message ignored due to missing keywords.", chat_id=TEST3_CHAT_ID)
+#         return
+
+#     print(result)
+#     logging.debug(f"result data: {result}")
+
+#     # Extract new webhook fields
+#     exchange = result["exchange"]
+#     main_symbol = result["symbol"]
+#     buyfut = int(result["buyfut"])
+#     action = result["action"]  # 'buy' or 'sell'
+#     contracts = int(result["contracts"])
+#     position_size = int(result["position_size"])
+#     close_price = float(result["close_price"])
+#     order_type = result["order_type"]
+
+#     print("=== Extracted Values ===")
+#     print(f"Symbol: {main_symbol}")
+#     print(f"Action: {action}")
+#     print(f"Contracts: {contracts}")
+#     print(f"Position Size: {position_size}")
+#     print(f"Close Price: {close_price}")
+#     print(f"Order Type: {order_type}")
+#     print(f"Exchange: {exchange}")
+
+#     # Get symbol and lot size from CSV
+#     if buyfut == 1:
+#         print(f"Symbol: {main_symbol} -> use future chart for this")
+#         first_symbol, first_symbol_lot = get_future_name(
+#             symbol=main_symbol, exchange=exchange
+#         )
+#     else:
+#         ext_value = extract_option_details(main_symbol)
+#         if ext_value:
+#             main_symbol = ext_value["main_symbol"]
+#             date = ext_value["date"]
+#             option_type = ext_value["option_type"]
+#             strike = ext_value["strike"]
+#             (
+#                 first_symbol,
+#                 first_main_symbol,
+#                 first_symbol_lot,
+#                 first_expiry_date,
+#                 main_ss,
+#             ) = getting_strike(
+#                 symbol=main_symbol,
+#                 option_type=option_type,
+#                 strike=strike,
+#                 exchnge=exchange,
+#                 date=date,
+#             )
+#         else:
+#             error_msg = "❌ TradingView symbol not found"
+#             print(error_msg)
+#             send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#             return
+
+#     if first_symbol is None:
+#         error_msg = "❌ First symbol is None - cannot proceed"
+#         print(error_msg)
+#         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#         return
+
+#     first_symbol = str(first_symbol)
+#     first_symbol_lot = int(first_symbol_lot)
+
+#     # Calculate quantity based on contracts * lot_size
+#     quantity = contracts * first_symbol_lot
+
+#     print(f"Trading Symbol: {first_symbol}")
+#     print(f"Lot Size: {first_symbol_lot}")
+#     print(f"Calculated Quantity: {quantity}")
+
+#     # Get exchange segment and instrument ID for XTS
+#     exchange_segment, exchange_instrument_id = get_instrument_details(first_symbol, exchange)
+
+#     if exchange_segment is None or exchange_instrument_id is None:
+#         error_msg = f"❌ Could not get instrument details for {first_symbol}"
+#         print(error_msg)
+#         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#         return
+
+#     print(f"XTS Details - Segment: {exchange_segment}, Instrument ID: {exchange_instrument_id}, Product: {product_type}")
+
+#     # Execute trading logic based on action
+#     try:
+#         if action == "buy":
+#             # BUY action - place order directly
+#             print(f"📈 BUY action detected - placing BUY order")
+#             send_telegram_message(
+#                 f"📈 Executing BUY order\n"
+#                 f"Symbol: {first_symbol}\n"
+#                 f"Quantity: {quantity}\n"
+#                 f"Price: {close_price}\n"
+#                 f"Type: {order_type}",
+#                 chat_id=TEST3_CHAT_ID
+#             )
+
+#             place_market_order(
+#                 symbol=first_symbol,
+#                 qty=quantity,
+#                 limit_price=close_price,
+#                 order_type=order_type,
+#                 buy_sell="BUY",
+#                 product_type=product_type,
+#                 exchange_segment=exchange_segment,
+#                 exchange_instrument_id=exchange_instrument_id
+#             )
+
+#         elif action == "sell":
+#             # SELL action - check if position_size == 0 (stoploss)
+#             if position_size == 0:
+#                 # This is a stoploss - check if position exists first
+#                 print(f"📉 SELL action with position_size=0 (STOPLOSS) - checking positions first")
+
+#                 # Check positions to see if we have anything to sell
+#                 position_exists = check_position_exists(
+#                     symbol=first_symbol,
+#                     exchange_instrument_id=exchange_instrument_id
+#                 )
+
+#                 if not position_exists:
+#                     # No position exists - skip the order
+#                     skip_msg = (
+#                         f"⚠️ SKIPPING SELL order (Stoploss)\n"
+#                         f"Reason: No position exists for {first_symbol}\n"
+#                         f"This means the BUY never went through"
+#                     )
+#                     print(skip_msg)
+#                     send_telegram_message(skip_msg, chat_id=TEST3_CHAT_ID)
+#                     logger.warning(f"Skipped SELL order for {first_symbol} - no position exists")
+#                     return
+#                 else:
+#                     # Position exists - place the SELL order
+#                     print(f"✓ Position exists for {first_symbol} - placing SELL order")
+#                     send_telegram_message(
+#                         f"📉 Executing SELL order (Stoploss)\n"
+#                         f"Symbol: {first_symbol}\n"
+#                         f"Quantity: {quantity}\n"
+#                         f"Price: {close_price}\n"
+#                         f"Type: {order_type}",
+#                         chat_id=TEST3_CHAT_ID
+#                     )
+
+#                     place_market_order(
+#                         symbol=first_symbol,
+#                         qty=quantity,
+#                         limit_price=close_price,
+#                         order_type=order_type,
+#                         buy_sell="SELL",
+#                         product_type=product_type,
+#                         exchange_segment=exchange_segment,
+#                         exchange_instrument_id=exchange_instrument_id
+#                     )
+#             else:
+#                 # Normal SELL (position_size != 0) - place order directly
+#                 print(f"📉 SELL action (normal exit) - placing SELL order")
+#                 send_telegram_message(
+#                     f"📉 Executing SELL order\n"
+#                     f"Symbol: {first_symbol}\n"
+#                     f"Quantity: {quantity}\n"
+#                     f"Price: {close_price}\n"
+#                     f"Type: {order_type}",
+#                     chat_id=TEST3_CHAT_ID
+#                 )
+
+#                 place_market_order(
+#                     symbol=first_symbol,
+#                     qty=quantity,
+#                     limit_price=close_price,
+#                     order_type=order_type,
+#                     buy_sell="SELL",
+#                     product_type=product_type,
+#                     exchange_segment=exchange_segment,
+#                     exchange_instrument_id=exchange_instrument_id
+#                 )
+#         else:
+#             error_msg = f"⚠️ Unknown action received: {action}"
+#             print(error_msg)
+#             send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+
+#     except Exception as e:
+#         error_msg = f"❌ Error executing order: {str(e)}"
+#         logger.error(error_msg, exc_info=True)
+#         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#         raise  # Re-raise to trigger the outer exception handler
 
 
 @app.route("/", methods=["GET"])
