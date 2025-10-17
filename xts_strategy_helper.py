@@ -647,17 +647,88 @@ def exit_all_positions(product_type="NRML", square_off_mode="NetWise"):
         send_telegram_message(error_msg)
         return None
 
+def check_position_exists(symbol, exchange_instrument_id=None):
+    """
+    Check if a position exists for the given symbol
+
+    Args:
+        symbol: Trading symbol
+        exchange_instrument_id: Optional instrument ID for precise matching
+
+    Returns:
+        bool: True if position exists (quantity != 0), False otherwise
+    """
+    global xts_token
+
+    try:
+        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
+        headers = {
+            "Authorization": xts_token,
+            "Content-Type": "application/json"
+        }
+
+        response = requests.get(positions_url, headers=headers, timeout=10)
+
+        # Handle "Data Not Available" case (no positions)
+        if response.status_code == 400:
+            positions_data = response.json()
+            if positions_data.get("code") == "e-portfolio-0005":
+                logger.info("No positions available")
+                return False
+
+        response.raise_for_status()
+        positions_data = response.json()
+
+        if positions_data.get("type") != "success":
+            logger.warning("Failed to get positions data")
+            return False
+
+        position_list = positions_data.get("result", {}).get("positionList", [])
+
+        if not position_list:
+            logger.info("No active positions")
+            return False
+
+        # Convert to string for comparison
+        exchange_instrument_id_str = str(exchange_instrument_id) if exchange_instrument_id else None
+
+        # Check if symbol exists in positions with non-zero quantity
+        for position in position_list:
+            position_instrument_id = str(position.get('ExchangeInstrumentId', ''))
+            position_symbol = position.get('TradingSymbol', '')
+            position_qty = int(position.get('Quantity', 0))
+
+            # Match by instrument ID (preferred) or symbol name
+            match_found = False
+            if exchange_instrument_id_str and position_instrument_id == exchange_instrument_id_str:
+                match_found = True
+            elif position_symbol == symbol:
+                match_found = True
+
+            if match_found and position_qty != 0:
+                logger.info(f"Position exists for {symbol}: Quantity = {position_qty}")
+                return True
+
+        logger.info(f"No position found for {symbol}")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error checking position existence: {e}")
+        # In case of error, return False to be safe and skip the order
+        return False
+
+
 def check_order_status(app_order_id):
     """Check order status using AppOrderID
-    
+
     Args:
         app_order_id: The AppOrderID from order placement response
-        
+
     Returns:
         dict: Order status details or None if error
     """
     global xts_token
-    
+
     try:
         url = f"{xts_api_root}/interactive/orders"
         headers = {
@@ -667,10 +738,10 @@ def check_order_status(app_order_id):
         params = {
             "appOrderID": app_order_id
         }
-        
+
         response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
-        
+
         return response.json()
     except Exception as e:
         logger.error(f"Failed to check order status: {e}")
@@ -1441,6 +1512,151 @@ def exit_half_position(symbol, match_qty, product_type, exchange_segment, exchan
         logger.error(f"Failed to exit half position for {symbol}: {e}")
         send_telegram_message(f"❌ Failed to exit half position for {symbol}: {str(e)}")
         return None
+
+def place_market_order(symbol, qty, limit_price, order_type, buy_sell, product_type, exchange_segment, exchange_instrument_id):
+    """
+    Simplified order placement function - places order and checks status with Telegram notification
+
+    Args:
+        symbol: Trading symbol
+        qty: Order quantity
+        limit_price: Limit price for the order (0 for market orders)
+        order_type: "MKT" for market, "LMT" for limit
+        buy_sell: "BUY" or "SELL"
+        product_type: "MIS", "NRML", "CNC"
+        exchange_segment: Exchange segment ID
+        exchange_instrument_id: Exchange instrument ID
+    """
+    global xts_token
+
+    try:
+        url = f"{xts_api_root}/interactive/orders"
+        headers = {
+            "Authorization": xts_token,
+            "Content-Type": "application/json"
+        }
+
+        # Determine XTS order type and price
+        if order_type == "LMT":
+            xts_order_type = "LIMIT"
+            price = float(limit_price)
+        else:
+            xts_order_type = "MARKET"
+            price = 0
+
+        payload = {
+            "exchangeSegment": exchange_segment,
+            "exchangeInstrumentID": exchange_instrument_id,
+            "productType": product_type,
+            "orderType": xts_order_type,
+            "orderSide": buy_sell,
+            "timeInForce": "DAY",
+            "disclosedQuantity": 0,
+            "orderQuantity": abs(int(qty)),
+            "limitPrice": price,
+            "stopPrice": 0,
+            "orderUniqueIdentifier": f"XTS_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "clientID": "*****"
+        }
+
+        print(f"=== Placing {order_type} order ===")
+        print(f"Payload: {payload}")
+
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        result = response.json()
+        print(f"Order placement response: {result}")
+
+        if result.get("type") == "success":
+            app_order_id = result.get("result", {}).get("AppOrderID", "N/A")
+            logger.info(f"Order placed successfully for {symbol}, AppOrderID: {app_order_id}")
+
+            # Wait briefly for order to process
+            import time
+            time.sleep(1)
+
+            # Check order status
+            order_status_response = check_order_status(app_order_id)
+
+            if order_status_response and order_status_response.get("type") == "success":
+                order_history = order_status_response.get("result", [])
+
+                # Check for rejection
+                rejected_order = None
+                latest_order = None
+
+                for order in order_history:
+                    if order.get("OrderStatus") == "Rejected":
+                        rejected_order = order
+                        break
+                    latest_order = order
+
+                if rejected_order:
+                    # Order rejected
+                    reject_reason = rejected_order.get("CancelRejectReason", "Unknown reason")
+                    error_msg = (
+                        f"❌ ORDER REJECTED\n"
+                        f"Symbol: {symbol}\n"
+                        f"Action: {buy_sell} {qty}\n"
+                        f"Type: {order_type}\n"
+                        f"Price: {price if order_type == 'LMT' else 'MARKET'}\n"
+                        f"Order ID: {app_order_id}\n"
+                        f"Reason: {reject_reason}"
+                    )
+                    logger.error(error_msg)
+                    send_telegram_message(error_msg)
+                else:
+                    # Order successful
+                    final_status = latest_order.get("OrderStatus", "Unknown") if latest_order else "Unknown"
+                    avg_price = latest_order.get("OrderAverageTradedPrice", "") if latest_order else ""
+                    filled_qty = latest_order.get("CumulativeQuantity", 0) if latest_order else 0
+
+                    success_msg = (
+                        f"✅ ORDER SUCCESS\n"
+                        f"Symbol: {symbol}\n"
+                        f"Action: {buy_sell} {qty}\n"
+                        f"Type: {order_type}\n"
+                        f"Order ID: {app_order_id}\n"
+                        f"Status: {final_status}"
+                    )
+
+                    if avg_price and avg_price != "" and final_status in ["Filled", "Traded"]:
+                        success_msg += f"\nAvg Price: {avg_price}"
+                        success_msg += f"\nFilled Qty: {filled_qty}"
+
+                    logger.info(success_msg)
+                    send_telegram_message(success_msg)
+            else:
+                # Could not verify status
+                warning_msg = (
+                    f"⚠️ ORDER PLACED (Status pending)\n"
+                    f"Symbol: {symbol}\n"
+                    f"Action: {buy_sell} {qty}\n"
+                    f"Order ID: {app_order_id}"
+                )
+                logger.warning(warning_msg)
+                send_telegram_message(warning_msg)
+        else:
+            # Placement failed
+            error_desc = result.get('description', 'Unknown error')
+            error_msg = (
+                f"❌ ORDER FAILED\n"
+                f"Symbol: {symbol}\n"
+                f"Action: {buy_sell} {qty}\n"
+                f"Error: {error_desc}"
+            )
+            logger.error(error_msg)
+            send_telegram_message(error_msg)
+
+        return result
+
+    except Exception as e:
+        error_msg = f"❌ Exception placing order for {symbol}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        send_telegram_message(error_msg)
+        return None
+
 # Initialize XTS client on module load
 try:
     initialize_xts_client()
