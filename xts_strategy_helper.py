@@ -647,8 +647,37 @@ def exit_all_positions(product_type="NRML", square_off_mode="NetWise"):
         send_telegram_message(error_msg)
         return None
 
+def check_order_status(app_order_id):
+    """Check order status using AppOrderID
+    
+    Args:
+        app_order_id: The AppOrderID from order placement response
+        
+    Returns:
+        dict: Order status details or None if error
+    """
+    global xts_token
+    
+    try:
+        url = f"{xts_api_root}/interactive/orders"
+        headers = {
+            "Authorization": xts_token,
+            "Content-Type": "application/json"
+        }
+        params = {
+            "appOrderID": app_order_id
+        }
+        
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        return response.json()
+    except Exception as e:
+        logger.error(f"Failed to check order status: {e}")
+        return None
+
 def placing_market(symbol, qty, buy_sell, product_type, exchange_segment, exchange_instrument_id):
-    """Place market order using XTS API
+    """Place market order using XTS API and verify its status
 
     Args:
         symbol: Trading symbol
@@ -687,30 +716,81 @@ def placing_market(symbol, qty, buy_sell, product_type, exchange_segment, exchan
         response.raise_for_status()
 
         result = response.json()
-        print(result)
-
-        if result.get("type") == "success":
-            logger.info(f"Market order placed successfully for {symbol}")
-            send_telegram_message(f"✅ Market order placed for {symbol}: {buy_sell} {qty}")
-        else:
-            logger.error(f"Failed to place market order: {result}")
-            send_telegram_message(f"❌ Failed to place market order for {symbol}: {result.get('description', 'Unknown error')}")
+        print(f"Order placement response: {result}")
 
         if result.get("type") == "success":
             app_order_id = result.get("result", {}).get("AppOrderID", "N/A")
             logger.info(f"Market order placed successfully for {symbol}, AppOrderID: {app_order_id}")
-            send_telegram_message(
-                f"✅ Market order placed for {symbol}\n"
-                f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
-                f"🔢 Order ID: {app_order_id}"
-               
-            )
+            
+            # Wait a brief moment for order to process
+            import time
+            time.sleep(1)
+            
+            # Check order status
+            order_status_response = check_order_status(app_order_id)
+            
+            if order_status_response and order_status_response.get("type") == "success":
+                order_history = order_status_response.get("result", [])
+                
+                # Check if any of the order statuses is "Rejected"
+                rejected_order = None
+                latest_order = None
+                
+                for order in order_history:
+                    if order.get("OrderStatus") == "Rejected":
+                        rejected_order = order
+                        break
+                    # Keep track of the latest order status
+                    latest_order = order
+                
+                if rejected_order:
+                    # Order was rejected
+                    reject_reason = rejected_order.get("CancelRejectReason", "Unknown reason")
+                    logger.error(f"Market order REJECTED for {symbol}: {reject_reason}")
+                    send_telegram_message(
+                        f"❌ Market order REJECTED for {symbol}\n"
+                        f"📊 {buy_sell} {qty} @ MARKET\n"
+                        f"🔢 Order ID: {app_order_id}\n"
+                        f"⚠️ Rejection Reason: {reject_reason}"
+                    )
+                else:
+                    # Order was successful (not rejected)
+                    final_status = latest_order.get("OrderStatus", "Unknown") if latest_order else "Unknown"
+                    avg_price = latest_order.get("OrderAverageTradedPrice", "") if latest_order else ""
+                    filled_qty = latest_order.get("CumulativeQuantity", 0) if latest_order else 0
+                    
+                    success_message = (
+                        f"✅ Market order placed for {symbol}\n"
+                        f"📊 {buy_sell} {qty} @ MARKET\n"
+                        f"🔢 Order ID: {app_order_id}\n"
+                        f"📈 Status: {final_status}"
+                    )
+                    
+                    # Add price info if available and order is filled
+                    if avg_price and avg_price != "" and final_status in ["Filled", "Traded"]:
+                        success_message += f"\n💰 Avg Price: {avg_price}"
+                        success_message += f"\n✔️ Filled Qty: {filled_qty}"
+                    
+                    logger.info(f"Market order successful for {symbol}, Status: {final_status}")
+                    send_telegram_message(success_message)
+            else:
+                # Could not check order status, but placement was successful
+                logger.warning(f"Could not verify order status for {symbol}, but placement successful")
+                send_telegram_message(
+                    f"⚠️ Market order placed for {symbol}\n"
+                    f"📊 {buy_sell} {qty} @ MARKET\n"
+                    f"🔢 Order ID: {app_order_id}\n"
+                    f"⚠️ Status verification pending"
+                )
         else:
-            logger.error(f"Failed to place Market order: {result}")
+            # Initial order placement failed
+            error_desc = result.get('description', 'Unknown error')
+            logger.error(f"Failed to place market order: {result}")
             send_telegram_message(
-                f"❌ Failed to place Market order for {symbol}\n"
-                f"Error: {result.get('description', 'Unknown error')}"
-             )
+                f"❌ Failed to place market order for {symbol}\n"
+                f"📊 {buy_sell} {qty} @ MARKET\n"
+                f"Error: {error_desc}"
+            )
 
         return result
 
@@ -721,7 +801,7 @@ def placing_market(symbol, qty, buy_sell, product_type, exchange_segment, exchan
 
 
 def placing_limit(symbol, qty, limit_price, buy_sell, order_type, product_type, exchange_segment, exchange_instrument_id):
-    """Place limit or market order using XTS API
+    """Place limit or market order using XTS API and verify its status
 
     Args:
         symbol: Trading symbol
@@ -770,21 +850,85 @@ def placing_limit(symbol, qty, limit_price, buy_sell, order_type, product_type, 
         response.raise_for_status()
 
         result = response.json()
-        print(result)
+        print(f"Order placement response: {result}")
 
         if result.get("type") == "success":
             app_order_id = result.get("result", {}).get("AppOrderID", "N/A")
             logger.info(f"{order_type} order placed successfully for {symbol}, AppOrderID: {app_order_id}")
-            send_telegram_message(
-                f"✅ {order_type} order placed for {symbol}\n"
-                f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
-                f"🔢 Order ID: {app_order_id}"
-            )
+            
+            # Wait a brief moment for order to process
+            import time
+            time.sleep(1)
+            
+            # Check order status
+            order_status_response = check_order_status(app_order_id)
+            
+            if order_status_response and order_status_response.get("type") == "success":
+                order_history = order_status_response.get("result", [])
+                
+                # Check if any of the order statuses is "Rejected"
+                rejected_order = None
+                latest_order = None
+                
+                for order in order_history:
+                    if order.get("OrderStatus") == "Rejected":
+                        rejected_order = order
+                        break
+                    # Keep track of the latest order status
+                    latest_order = order
+                
+                if rejected_order:
+                    # Order was rejected
+                    reject_reason = rejected_order.get("CancelRejectReason", "Unknown reason")
+                    logger.error(f"{order_type} order REJECTED for {symbol}: {reject_reason}")
+                    send_telegram_message(
+                        f"❌ {order_type} order REJECTED for {symbol}\n"
+                        f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
+                        f"🔢 Order ID: {app_order_id}\n"
+                        f"⚠️ Rejection Reason: {reject_reason}"
+                    )
+                else:
+                    # Order was successful (not rejected)
+                    final_status = latest_order.get("OrderStatus", "Unknown") if latest_order else "Unknown"
+                    avg_price = latest_order.get("OrderAverageTradedPrice", "") if latest_order else ""
+                    filled_qty = latest_order.get("CumulativeQuantity", 0) if latest_order else 0
+                    leaves_qty = latest_order.get("LeavesQuantity", qty) if latest_order else qty
+                    
+                    success_message = (
+                        f"✅ {order_type} order placed for {symbol}\n"
+                        f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
+                        f"🔢 Order ID: {app_order_id}\n"
+                        f"📈 Status: {final_status}"
+                    )
+                    
+                    # Add execution details based on order status
+                    if final_status in ["Filled", "Traded"]:
+                        if avg_price and avg_price != "":
+                            success_message += f"\n💰 Avg Price: {avg_price}"
+                        success_message += f"\n✔️ Filled Qty: {filled_qty}"
+                    elif final_status in ["New", "PendingNew", "Open"]:
+                        if order_type == "LMT":
+                            success_message += f"\n⏳ Open Qty: {leaves_qty}"
+                    
+                    logger.info(f"{order_type} order successful for {symbol}, Status: {final_status}")
+                    send_telegram_message(success_message)
+            else:
+                # Could not check order status, but placement was successful
+                logger.warning(f"Could not verify order status for {symbol}, but placement successful")
+                send_telegram_message(
+                    f"⚠️ {order_type} order placed for {symbol}\n"
+                    f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
+                    f"🔢 Order ID: {app_order_id}\n"
+                    f"⚠️ Status verification pending"
+                )
         else:
+            # Initial order placement failed
+            error_desc = result.get('description', 'Unknown error')
             logger.error(f"Failed to place {order_type} order: {result}")
             send_telegram_message(
                 f"❌ Failed to place {order_type} order for {symbol}\n"
-                f"Error: {result.get('description', 'Unknown error')}"
+                f"📊 {buy_sell} {qty} @ {price if order_type == 'LMT' else 'MARKET'}\n"
+                f"Error: {error_desc}"
             )
 
         return result
