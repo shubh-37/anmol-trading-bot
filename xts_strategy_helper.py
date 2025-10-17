@@ -377,12 +377,13 @@ def cancel_single_order(symbol):
         return None
 
 
-def exit_single_order(symbol, exchange_instrument_id=None, product_type="NRML"):
+def exit_single_order(symbol, positions, exchange_instrument_id=None, product_type="NRML"):
     """
     Exit position for a specific symbol using XTS Square-off API
     
     Args:
         symbol: Trading symbol to exit
+        positions: List of positions (already fetched)
         exchange_instrument_id: Optional instrument ID for precise matching
         product_type: Product type (NRML, MIS, CNC) - default NRML
     """
@@ -391,30 +392,8 @@ def exit_single_order(symbol, exchange_instrument_id=None, product_type="NRML"):
     try:
         print(f"=== Starting exit for symbol: {symbol} ===")
         
-        # Get positions
-        positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
-        headers = {
-            "Authorization": xts_token,
-            "Content-Type": "application/json"
-        }
-
-        response = requests.get(positions_url, headers=headers, timeout=10)
-        response.raise_for_status()
-
-        positions_data = response.json()
-        print(f"Positions data: {positions_data}")
-
-        if positions_data.get("type") != "success":
-            logger.warning(f"Failed to get positions: {positions_data}")
-            send_telegram_message(
-                f"⚠️ Failed to get positions for {symbol}"
-            )
-            return None
-
-        positions = positions_data.get("result", {}).get("positionList", [])
-
         if not positions:
-            print("No positions found")
+            print("No positions provided")
             send_telegram_message("ℹ️ No open positions found")
             return None
 
@@ -469,10 +448,14 @@ def exit_single_order(symbol, exchange_instrument_id=None, product_type="NRML"):
 
         # Exit the position using square-off API
         squareoff_url = f"{xts_api_root}/interactive/portfolio/squareoff"
+        headers = {
+            "Authorization": xts_token,
+            "Content-Type": "application/json"
+        }
         
         payload = {
             "exchangeSegment": exchange_segment,
-            "exchangeInstrumentID": int(instrument_id),  # Ensure it's an integer
+            "exchangeInstrumentID": int(instrument_id),
             "productType": position_product_type,
             "squareoffMode": "DayWise",
             "squareOffQtyValue": squareoff_qty,
@@ -1037,7 +1020,7 @@ def exit_only_sell_trades(symbol, exchange_instrument_id=None):
     print('Exchange instrument id type: ', type(exchange_instrument_id))
     
     try:
-        # Fetch positions from XTS
+        # Fetch positions from XTS (single API call)
         positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
@@ -1098,7 +1081,8 @@ def exit_only_sell_trades(symbol, exchange_instrument_id=None):
                             f"Quantity: {net_qty}\n"
                             f"Instrument ID: {position_instrument_id}"
                         )
-                        exit_single_order(trading_symbol)
+                        # Pass the already-fetched positions to avoid duplicate API call
+                        exit_single_order(trading_symbol, position_list, exchange_instrument_id)
                         send_telegram_message(f"✅ Exited sell side position for {trading_symbol}")
                         return True
                     else:
@@ -1134,9 +1118,12 @@ def exit_only_buy_trades(symbol, exchange_instrument_id=None):
         exchange_instrument_id: Optional exchange instrument ID for more precise matching
     """
     global xts_token
+    print('Executing for symbol: ', symbol)
+    print('Exchange instrument id: ', exchange_instrument_id)
+    print('Exchange instrument id type: ', type(exchange_instrument_id))
     
     try:
-        # Fetch positions from XTS
+        # Fetch positions from XTS (single API call)
         positions_url = f"{xts_api_root}/interactive/portfolio/dealerpositions?dayOrNet=DayWise&clientID=*****"
         headers = {
             "Authorization": xts_token,
@@ -1150,41 +1137,78 @@ def exit_only_buy_trades(symbol, exchange_instrument_id=None):
         
         if positions_data.get("type") != "success":
             logger.warning("Failed to get positions data")
+            send_telegram_message("⚠️ Failed to get positions data")
             return None
         
         position_list = positions_data.get("result", {}).get("positionList", [])
         
         if not position_list:
             print("No active positions.")
+            send_telegram_message("ℹ️ No active positions found")
             return None
+            
+        print('Position list: ', position_list)
+        
+        # Convert exchange_instrument_id to string for comparison
+        exchange_instrument_id_str = str(exchange_instrument_id) if exchange_instrument_id else None
         
         # Check if symbol exists in positions
         for position in position_list:
-            symbol_match = position.get('TradingSymbol') == symbol
-            if exchange_instrument_id:
-                symbol_match = symbol_match or position.get('ExchangeInstrumentId') == exchange_instrument_id
+            position_instrument_id = str(position.get('ExchangeInstrumentId', ''))
+            
+            print(f'Comparing: position[{position_instrument_id}] vs target[{exchange_instrument_id_str}]')
+            
+            # Match by ExchangeInstrumentId (preferred) or TradingSymbol (fallback)
+            symbol_match = False
+            if exchange_instrument_id_str and position_instrument_id == exchange_instrument_id_str:
+                symbol_match = True
+                print(f'✓ Matched by ExchangeInstrumentId: {position_instrument_id}')
+            elif position.get('TradingSymbol') == symbol:
+                symbol_match = True
+                print(f'✓ Matched by TradingSymbol: {symbol}')
+            
+            print('Symbol match: ', symbol_match)
             
             if symbol_match:
                 net_qty = int(position.get('Quantity', 0))
+                trading_symbol = position.get('TradingSymbol', symbol)
+                
+                print(f'Net quantity: {net_qty}')
                 
                 if net_qty != 0:
                     if net_qty > 0:  # Buy side position (positive quantity)
-                        print(f"Buy side position open for {symbol}. Exiting buy trade.")
-                        exit_single_order(symbol)
-                        send_telegram_message(f"✅ Exited buy side position for {symbol}")
+                        print(f"Buy side position open for {trading_symbol}. Exiting buy trade.")
+                        send_telegram_message(
+                            f"🔄 Exiting BUY position:\n"
+                            f"Symbol: {trading_symbol}\n"
+                            f"Quantity: {net_qty}\n"
+                            f"Instrument ID: {position_instrument_id}"
+                        )
+                        # Pass the already-fetched positions to avoid duplicate API call
+                        exit_single_order(trading_symbol, position_list, exchange_instrument_id)
+                        send_telegram_message(f"✅ Exited buy side position for {trading_symbol}")
                         return True
                     else:
-                        print(f"Sell side position open for {symbol}. Not a buy trade, skipping.")
+                        print(f"Sell side position open for {trading_symbol}. Not a buy trade, skipping.")
+                        send_telegram_message(
+                            f"ℹ️ Sell side position found for {trading_symbol} (Qty: {net_qty}). Not exiting.",
+                        )
                         return False
                 else:
-                    print(f"Position quantity is 0 for {symbol}.")
+                    print(f"Position quantity is 0 for {trading_symbol}.")
+                    send_telegram_message(f"ℹ️ Position quantity is 0 for {trading_symbol}")
                     return False
         
-        print(f"No position found for symbol: {symbol}")
+        print(f"No position found for symbol: {symbol} (ID: {exchange_instrument_id_str})")
+        send_telegram_message(
+            f"ℹ️ No matching position found:\n"
+            f"Symbol: {symbol}\n"
+            f"Instrument ID: {exchange_instrument_id_str}",
+        )
         return False
         
     except Exception as e:
-        logger.error(f"Failed to exit buy trades for {symbol}: {e}")
+        logger.error(f"Failed to exit buy trades for {symbol}: {e}", exc_info=True)
         send_telegram_message(f"❌ Failed to exit buy trades for {symbol}: {str(e)}")
         return None
 
