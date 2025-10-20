@@ -1561,14 +1561,56 @@ def place_market_order(symbol, qty, limit_price, order_type, buy_sell, product_t
 
         print(f"=== Placing {order_type} order ===")
         print(f"Payload: {payload}")
+        
+        # Enhanced logging before request
+        logger.info(f"=== ORDER PLACEMENT REQUEST ===")
+        logger.info(f"Symbol: {symbol}, Type: {order_type}, Side: {buy_sell}, Qty: {qty}")
+        logger.info(f"URL: {url}")
+        logger.info(f"Headers: {{'Authorization': '***TOKEN***', 'Content-Type': '{headers['Content-Type']}'}}")
+        logger.info(f"Payload: {payload}")
 
         response = requests.post(url, json=payload, headers=headers, timeout=10)
-        response.raise_for_status()
+        
+        # Log raw response details
+        logger.info(f"=== ORDER PLACEMENT RESPONSE ===")
+        logger.info(f"Status Code: {response.status_code}")
+        logger.info(f"Response Headers: {dict(response.headers)}")
+        logger.info(f"Response Text: {response.text}")
+        
+        # Try to parse JSON response
+        try:
+            result = response.json()
+            logger.info(f"Response JSON: {result}")
+        except Exception as json_error:
+            logger.error(f"Failed to parse response as JSON: {json_error}")
+            logger.error(f"Raw response content: {response.content}")
+            result = None
+        
+        # Check for HTTP errors
+        if response.status_code >= 400:
+            error_details = {
+                "status_code": response.status_code,
+                "reason": response.reason,
+                "text": response.text,
+                "headers": dict(response.headers)
+            }
+            logger.error(f"HTTP Error {response.status_code}: {error_details}")
+            
+            error_msg = (
+                f"❌ ORDER HTTP ERROR\n"
+                f"Symbol: {symbol}\n"
+                f"Action: {buy_sell} {qty}\n"
+                f"Status: {response.status_code} {response.reason}\n"
+                f"Response: {response.text[:200]}"  # First 200 chars
+            )
+            send_telegram_message(error_msg)
+            
+            # Still try to raise for status to get proper exception
+            response.raise_for_status()
 
-        result = response.json()
         print(f"Order placement response: {result}")
 
-        if result.get("type") == "success":
+        if result and result.get("type") == "success":
             app_order_id = result.get("result", {}).get("AppOrderID", "N/A")
             logger.info(f"Order placed successfully for {symbol}, AppOrderID: {app_order_id}")
 
@@ -1577,7 +1619,9 @@ def place_market_order(symbol, qty, limit_price, order_type, buy_sell, product_t
             time.sleep(1)
 
             # Check order status
+            logger.info(f"Checking order status for AppOrderID: {app_order_id}")
             order_status_response = check_order_status(app_order_id)
+            logger.info(f"Order status response: {order_status_response}")
 
             if order_status_response and order_status_response.get("type") == "success":
                 order_history = order_status_response.get("result", [])
@@ -1639,11 +1683,17 @@ def place_market_order(symbol, qty, limit_price, order_type, buy_sell, product_t
                 send_telegram_message(warning_msg)
         else:
             # Placement failed
-            error_desc = result.get('description', 'Unknown error')
+            error_desc = result.get('description', 'Unknown error') if result else 'No response data'
+            error_code = result.get('code', 'N/A') if result else 'N/A'
+            
+            logger.error(f"Order placement failed - Code: {error_code}, Description: {error_desc}")
+            logger.error(f"Full result object: {result}")
+            
             error_msg = (
                 f"❌ ORDER FAILED\n"
                 f"Symbol: {symbol}\n"
                 f"Action: {buy_sell} {qty}\n"
+                f"Error Code: {error_code}\n"
                 f"Error: {error_desc}"
             )
             logger.error(error_msg)
@@ -1651,15 +1701,32 @@ def place_market_order(symbol, qty, limit_price, order_type, buy_sell, product_t
 
         return result
 
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP Error for {symbol}: {e}")
+        logger.error(f"Response status: {e.response.status_code}")
+        logger.error(f"Response body: {e.response.text}")
+        logger.error(f"Response headers: {dict(e.response.headers)}")
+        
+        error_msg = (
+            f"❌ HTTP ERROR placing order\n"
+            f"Symbol: {symbol}\n"
+            f"Action: {buy_sell} {qty}\n"
+            f"Status: {e.response.status_code}\n"
+            f"Error: {e.response.text[:200]}"
+        )
+        send_telegram_message(error_msg)
+        return None
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request exception for {symbol}: {e}", exc_info=True)
+        error_msg = f"❌ Network error placing order for {symbol}: {str(e)}"
+        send_telegram_message(error_msg)
+        return None
+        
     except Exception as e:
         error_msg = f"❌ Exception placing order for {symbol}: {str(e)}"
         logger.error(error_msg, exc_info=True)
+        logger.error(f"Exception type: {type(e).__name__}")
+        logger.error(f"Exception args: {e.args}")
         send_telegram_message(error_msg)
         return None
-
-# Initialize XTS client on module load
-try:
-    initialize_xts_client()
-except Exception as e:
-    logger.error(f"Failed to initialize XTS client on module load: {e}")
-    print(f"Warning: XTS client initialization failed: {e}")
