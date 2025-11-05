@@ -14,11 +14,19 @@ import datetime
 from dotenv import load_dotenv
 import hashlib
 import hmac
+import redis
 
 # Load environment variables
 load_dotenv()
 # Flask app initialization
 app = Flask(__name__)
+
+redis_client = redis.Redis(
+    host='localhost',
+    port=6379,
+    db=0,
+    decode_responses=True
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -36,11 +44,57 @@ TOKEN_TELEGRAM = os.getenv('TELEGRAM_TOKEN')
 TEST3_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', 5002))
+POSITION_KEY_PREFIX = "xts_position:"
 
 # Validate required environment variables
 if not all([TOKEN_TELEGRAM, TEST3_CHAT_ID]):
     raise ValueError("Missing required environment variables. Check .env file.")
 
+def get_position_from_redis(symbol):
+    """Get current net position (in lots) for a symbol from Redis"""
+    try:
+        key = f"{POSITION_KEY_PREFIX}{symbol}"
+        position = redis_client.get(key)
+        if position is None:
+            return 0
+        return int(position)
+    except Exception as e:
+        logging.error(f"Error reading position from Redis for {symbol}: {e}")
+        return 0
+
+def set_position_in_redis(symbol, position_lots):
+    """Store current net position (in lots) for a symbol in Redis"""
+    try:
+        key = f"{POSITION_KEY_PREFIX}{symbol}"
+        redis_client.set(key, int(position_lots))
+        logging.info(f"Stored position in Redis: {symbol} = {position_lots} lots")
+    except Exception as e:
+        logging.error(f"Error storing position in Redis for {symbol}: {e}")
+        raise
+
+def clear_position_in_redis(symbol):
+    """Clear/delete position for a symbol from Redis"""
+    try:
+        key = f"{POSITION_KEY_PREFIX}{symbol}"
+        redis_client.delete(key)
+        logging.info(f"Cleared position in Redis for {symbol}")
+    except Exception as e:
+        logging.error(f"Error clearing position in Redis for {symbol}: {e}")
+
+def get_all_positions_from_redis():
+    """Get all positions from Redis (useful for debugging/monitoring)"""
+    try:
+        pattern = f"{POSITION_KEY_PREFIX}*"
+        keys = redis_client.keys(pattern)
+        positions = {}
+        for key in keys:
+            symbol = key.replace(POSITION_KEY_PREFIX, "")
+            position = redis_client.get(key)
+            positions[symbol] = int(position) if position else 0
+        return positions
+    except Exception as e:
+        logging.error(f"Error reading all positions from Redis: {e}")
+        return {}
 
 def save_to_csv(parsed_data):
     """Save trading data to CSV with proper validation and error handling - NEW FORMAT"""
@@ -548,11 +602,8 @@ def get_instrument_details(symbol, exchange):
 
 def order_king_executer_xts(result, product_type="NRML"):
     """
-    Execute trading orders for XTS platform based on webhook data - Simplified logic
-    Implemented per user's specified rules:
-      - position_size == 0 -> stoploss/close: only act if there is an existing net position; otherwise skip
-      - position_size != 0 -> treat as signed trade lots (positive buy, negative sell)
-      - identical repeated signals that wouldn't change net are ignored
+    Execute trading orders for XTS platform based on webhook data - Redis-backed version
+    Positions are now stored in Redis for persistence across restarts
     """
     if not result:
         print("Message ignored due to missing keywords.")
@@ -566,14 +617,13 @@ def order_king_executer_xts(result, product_type="NRML"):
     exchange = result.get("exchange") or result.get("symbol", {}).get("exchange")
     main_symbol = result.get("symbol") or result.get("symbol", {}).get("ticker")
     buyfut = int(result.get("buyfut", 0))
-    # Note: action may be present but we use position_size to determine signed trade
-    # action_text = result.get("action", "").lower()
     contracts = int(result.get("contracts", 0))
-    position_size = int(result.get("position_size", 0))  # signed lots from webhook
+    position_size = int(result.get("position_size", 0))
+    
     # Fallback to 'contracts' if position_size not provided
     if "position_size" not in result and contracts != 0:
         position_size = contracts
-    # price fields
+    
     close_price = float(result.get("close_price") or result.get("price", {}).get("close", 0.0))
     order_type = result.get("order_type") or (result.get("meta") or {}).get("order_type", "MKT")
 
@@ -623,7 +673,6 @@ def order_king_executer_xts(result, product_type="NRML"):
     first_symbol = str(first_symbol)
     first_symbol_lot = int(first_symbol_lot)
 
-    # compute qty for incoming trade (lots -> units)
     incoming_qty_units = abs(position_size) * first_symbol_lot
 
     print(f"Trading Symbol: {first_symbol}")
@@ -640,34 +689,25 @@ def order_king_executer_xts(result, product_type="NRML"):
 
     print(f"XTS Details - Segment: {exchange_segment}, Instrument ID: {exchange_instrument_id}, Product: {product_type}")
 
-    # ---- Maintain local net positions by symbol (lots) ----
-    # NOTE: Persist this dict in production (file/DB) to survive restarts.
-    global current_net_positions
+    # ---- Get current net position from Redis ----
+    current_net_lots = get_position_from_redis(first_symbol)
+    
+    # Optionally sync with live XTS position
     try:
-        current_net_positions
-    except NameError:
-        current_net_positions = {}
-
-    # If available, try to get live XTS position (signed units) and convert to lots for truth
-    current_net_lots = current_net_positions.get(first_symbol, 0)  # signed lots
-    try:
-        # optional helper: if you have get_xts_position returning signed units, use it to correct local state
         if "get_xts_position" in globals():
-            live_units = get_xts_position(first_symbol)  # expect signed units (positive long, negative short)
+            live_units = get_xts_position(first_symbol)
             if live_units is not None:
-                # convert units -> lots (integer division)
                 live_lots = int(live_units // first_symbol_lot) if first_symbol_lot else 0
                 current_net_lots = live_lots
-                current_net_positions[first_symbol] = current_net_lots
+                set_position_in_redis(first_symbol, current_net_lots)
     except Exception as _e:
-        # ignore failures from live query and fall back to local state
         logging.debug(f"get_xts_position failed: {_e}")
 
     print(f"Current net (lots) for {first_symbol}: {current_net_lots}")
 
     # ---- Core logic per your requested rules ----
     try:
-        # 1) STOPLOSS / position_size == 0: close existing net positions if any, else ignore
+        # 1) STOPLOSS / position_size == 0: close existing net positions if any
         if position_size == 0:
             print("Received stoploss (position_size == 0) signal")
             if current_net_lots == 0:
@@ -676,7 +716,6 @@ def order_king_executer_xts(result, product_type="NRML"):
                 send_telegram_message(msg, chat_id=TEST3_CHAT_ID)
                 return
             else:
-                # Close entire net position by placing opposite-side order
                 close_side = "BUY" if current_net_lots < 0 else "SELL"
                 qty_to_close = abs(current_net_lots) * first_symbol_lot
                 print(f"Closing existing net for {first_symbol}: side={close_side}, qty={qty_to_close}")
@@ -697,20 +736,18 @@ def order_king_executer_xts(result, product_type="NRML"):
                     exchange_instrument_id=exchange_instrument_id,
                 )
 
-                # update local net to zero
-                current_net_positions[first_symbol] = 0
+                # Clear position in Redis
+                set_position_in_redis(first_symbol, 0)
                 print(f"Net for {first_symbol} set to 0 after closing.")
                 return
 
-        # 2) Non-zero position_size: treat as signed trade lots to execute
-        # If incoming instruction equals current net exactly — ignore (duplicate)
+        # 2) Non-zero position_size: treat as signed trade lots
         if position_size == current_net_lots:
             msg = f"⚖️ Ignored: incoming position_size ({position_size}) equals current net ({current_net_lots}) for {first_symbol}"
             print(msg)
             send_telegram_message(msg, chat_id=TEST3_CHAT_ID)
             return
 
-        # Otherwise execute the incoming trade exactly as specified (signed lots)
         trade_side = "BUY" if position_size > 0 else "SELL"
         trade_qty_units = abs(position_size) * first_symbol_lot
 
@@ -736,17 +773,219 @@ def order_king_executer_xts(result, product_type="NRML"):
             exchange_instrument_id=exchange_instrument_id,
         )
 
-        # Update local net position by adding the signed lots (position_size)
+        # Update position in Redis
         new_net = current_net_lots + position_size
-        current_net_positions[first_symbol] = new_net
+        set_position_in_redis(first_symbol, new_net)
         print(f"Updated net for {first_symbol}: {current_net_lots} -> {new_net}")
         return
 
     except Exception as e:
         error_msg = f"❌ Error executing order: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        logging.error(error_msg, exc_info=True)
         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
         raise
+
+# def order_king_executer_xts(result, product_type="NRML"):
+#     """
+#     Execute trading orders for XTS platform based on webhook data - Simplified logic
+#     Implemented per user's specified rules:
+#       - position_size == 0 -> stoploss/close: only act if there is an existing net position; otherwise skip
+#       - position_size != 0 -> treat as signed trade lots (positive buy, negative sell)
+#       - identical repeated signals that wouldn't change net are ignored
+#     """
+#     if not result:
+#         print("Message ignored due to missing keywords.")
+#         send_telegram_message("⚠️ Message ignored due to missing keywords.", chat_id=TEST3_CHAT_ID)
+#         return
+
+#     print(result)
+#     logging.debug(f"result data: {result}")
+
+#     # ---- Extract fields (expecting flat parsed payload) ----
+#     exchange = result.get("exchange") or result.get("symbol", {}).get("exchange")
+#     main_symbol = result.get("symbol") or result.get("symbol", {}).get("ticker")
+#     buyfut = int(result.get("buyfut", 0))
+#     # Note: action may be present but we use position_size to determine signed trade
+#     # action_text = result.get("action", "").lower()
+#     contracts = int(result.get("contracts", 0))
+#     position_size = int(result.get("position_size", 0))  # signed lots from webhook
+#     # Fallback to 'contracts' if position_size not provided
+#     if "position_size" not in result and contracts != 0:
+#         position_size = contracts
+#     # price fields
+#     close_price = float(result.get("close_price") or result.get("price", {}).get("close", 0.0))
+#     order_type = result.get("order_type") or (result.get("meta") or {}).get("order_type", "MKT")
+
+#     print("=== Extracted Values ===")
+#     print(f"Symbol: {main_symbol}")
+#     print(f"Contracts (raw): {contracts}")
+#     print(f"Position Size (signed lots): {position_size}")
+#     print(f"Close Price: {close_price}")
+#     print(f"Order Type: {order_type}")
+#     print(f"Exchange: {exchange}")
+
+#     # ---- Resolve tradable symbol & lot size ----
+#     if buyfut == 1:
+#         first_symbol, first_symbol_lot = get_future_name(symbol=main_symbol, exchange=exchange)
+#     else:
+#         ext_value = extract_option_details(main_symbol)
+#         if ext_value:
+#             main_symbol = ext_value["main_symbol"]
+#             date = ext_value["date"]
+#             option_type = ext_value["option_type"]
+#             strike = ext_value["strike"]
+#             (
+#                 first_symbol,
+#                 first_main_symbol,
+#                 first_symbol_lot,
+#                 first_expiry_date,
+#                 main_ss,
+#             ) = getting_strike(
+#                 symbol=main_symbol,
+#                 option_type=option_type,
+#                 strike=strike,
+#                 exchnge=exchange,
+#                 date=date,
+#             )
+#         else:
+#             error_msg = "❌ TradingView symbol not found"
+#             print(error_msg)
+#             send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#             return
+
+#     if first_symbol is None:
+#         error_msg = "❌ First symbol is None - cannot proceed"
+#         print(error_msg)
+#         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#         return
+
+#     first_symbol = str(first_symbol)
+#     first_symbol_lot = int(first_symbol_lot)
+
+#     # compute qty for incoming trade (lots -> units)
+#     incoming_qty_units = abs(position_size) * first_symbol_lot
+
+#     print(f"Trading Symbol: {first_symbol}")
+#     print(f"Lot Size: {first_symbol_lot}")
+#     print(f"Incoming trade (lots): {position_size}, units: {incoming_qty_units}")
+
+#     # ---- Instrument details for XTS ----
+#     exchange_segment, exchange_instrument_id = get_instrument_details(first_symbol, exchange)
+#     if exchange_segment is None or exchange_instrument_id is None:
+#         error_msg = f"❌ Could not get instrument details for {first_symbol}"
+#         print(error_msg)
+#         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#         return
+
+#     print(f"XTS Details - Segment: {exchange_segment}, Instrument ID: {exchange_instrument_id}, Product: {product_type}")
+
+#     # ---- Maintain local net positions by symbol (lots) ----
+#     # NOTE: Persist this dict in production (file/DB) to survive restarts.
+#     global current_net_positions
+#     try:
+#         current_net_positions
+#     except NameError:
+#         current_net_positions = {}
+
+#     # If available, try to get live XTS position (signed units) and convert to lots for truth
+#     current_net_lots = current_net_positions.get(first_symbol, 0)  # signed lots
+#     try:
+#         # optional helper: if you have get_xts_position returning signed units, use it to correct local state
+#         if "get_xts_position" in globals():
+#             live_units = get_xts_position(first_symbol)  # expect signed units (positive long, negative short)
+#             if live_units is not None:
+#                 # convert units -> lots (integer division)
+#                 live_lots = int(live_units // first_symbol_lot) if first_symbol_lot else 0
+#                 current_net_lots = live_lots
+#                 current_net_positions[first_symbol] = current_net_lots
+#     except Exception as _e:
+#         # ignore failures from live query and fall back to local state
+#         logging.debug(f"get_xts_position failed: {_e}")
+
+#     print(f"Current net (lots) for {first_symbol}: {current_net_lots}")
+
+#     # ---- Core logic per your requested rules ----
+#     try:
+#         # 1) STOPLOSS / position_size == 0: close existing net positions if any, else ignore
+#         if position_size == 0:
+#             print("Received stoploss (position_size == 0) signal")
+#             if current_net_lots == 0:
+#                 msg = f"⚠️ SKIPPING stoploss for {first_symbol} — no net position exists"
+#                 print(msg)
+#                 send_telegram_message(msg, chat_id=TEST3_CHAT_ID)
+#                 return
+#             else:
+#                 # Close entire net position by placing opposite-side order
+#                 close_side = "BUY" if current_net_lots < 0 else "SELL"
+#                 qty_to_close = abs(current_net_lots) * first_symbol_lot
+#                 print(f"Closing existing net for {first_symbol}: side={close_side}, qty={qty_to_close}")
+#                 send_telegram_message(
+#                     f"📛 Closing net position for {first_symbol}\n"
+#                     f"Side: {close_side}\nQty: {qty_to_close}\nPrice: {close_price}\nType: {order_type}",
+#                     chat_id=TEST3_CHAT_ID,
+#                 )
+
+#                 place_market_order(
+#                     symbol=first_symbol,
+#                     qty=qty_to_close,
+#                     limit_price=close_price,
+#                     order_type=order_type,
+#                     buy_sell=close_side,
+#                     product_type=product_type,
+#                     exchange_segment=exchange_segment,
+#                     exchange_instrument_id=exchange_instrument_id,
+#                 )
+
+#                 # update local net to zero
+#                 current_net_positions[first_symbol] = 0
+#                 print(f"Net for {first_symbol} set to 0 after closing.")
+#                 return
+
+#         # 2) Non-zero position_size: treat as signed trade lots to execute
+#         # If incoming instruction equals current net exactly — ignore (duplicate)
+#         if position_size == current_net_lots:
+#             msg = f"⚖️ Ignored: incoming position_size ({position_size}) equals current net ({current_net_lots}) for {first_symbol}"
+#             print(msg)
+#             send_telegram_message(msg, chat_id=TEST3_CHAT_ID)
+#             return
+
+#         # Otherwise execute the incoming trade exactly as specified (signed lots)
+#         trade_side = "BUY" if position_size > 0 else "SELL"
+#         trade_qty_units = abs(position_size) * first_symbol_lot
+
+#         print(f"Executing trade for {first_symbol}: side={trade_side}, units={trade_qty_units}")
+#         send_telegram_message(
+#             f"🚀 Executing trade for {first_symbol}\n"
+#             f"Side: {trade_side}\n"
+#             f"Lots: {position_size}\n"
+#             f"Units: {trade_qty_units}\n"
+#             f"Price: {close_price}\n"
+#             f"Order Type: {order_type}",
+#             chat_id=TEST3_CHAT_ID,
+#         )
+
+#         place_market_order(
+#             symbol=first_symbol,
+#             qty=trade_qty_units,
+#             limit_price=close_price,
+#             order_type=order_type,
+#             buy_sell=trade_side,
+#             product_type=product_type,
+#             exchange_segment=exchange_segment,
+#             exchange_instrument_id=exchange_instrument_id,
+#         )
+
+#         # Update local net position by adding the signed lots (position_size)
+#         new_net = current_net_lots + position_size
+#         current_net_positions[first_symbol] = new_net
+#         print(f"Updated net for {first_symbol}: {current_net_lots} -> {new_net}")
+#         return
+
+#     except Exception as e:
+#         error_msg = f"❌ Error executing order: {str(e)}"
+#         logger.error(error_msg, exc_info=True)
+#         send_telegram_message(error_msg, chat_id=TEST3_CHAT_ID)
+#         raise
 
         
 # def order_king_executer_xts(result, product_type="NRML"):
