@@ -125,7 +125,7 @@ if __name__ == "__main__":
             f"🚀 Trading server has started successfully!\n\n"
             f"📍 Server: http://{host}:{port}\n"
             f"🔧 Threads: {threads}\n"
-            f"📊 Fyers Webhook: /sha/fyers\n"
+            f"📊 Fyers Webhook: /fyers\n"
         )
         send_telegram_message(startup_msg)
 
