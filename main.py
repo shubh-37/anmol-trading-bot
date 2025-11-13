@@ -51,7 +51,6 @@ def save_to_csv(parsed_data):
             "exchange",
             "symbol",
             "buyfut",
-            "action",
             "contracts",
             "position_size",
             "close_price",
