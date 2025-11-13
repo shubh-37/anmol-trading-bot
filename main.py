@@ -196,7 +196,7 @@ def parse_json_message(json_data):
         # Check if the tag contains "radhe algo"
         tag = json_data["meta"].get("tag", "").lower()
         if "radhe" not in tag or "algo" not in tag:
-            logger.debug("Message does not contain required keywords in tag")
+            logger.info("Message does not contain required keywords in tag")
             return None
 
         result = {}
@@ -245,7 +245,7 @@ def parse_json_message(json_data):
         # Extract source for tracking
         result["source"] = json_data["meta"].get("source", "")
 
-        logger.debug(f"Successfully parsed JSON message: {result}")
+        logger.info(f"Successfully parsed JSON message: {result}")
         return result
 
     except ValueError as e:
@@ -292,7 +292,7 @@ def parse_message(message):
 
         # Check if both required keywords are in the message
         if "radhe" not in message.lower() or "algo" not in message.lower():
-            logger.debug("Message does not contain required keywords")
+            logger.info("Message does not contain required keywords")
             return None
 
         # Extract data with better error handling
@@ -364,7 +364,7 @@ def parse_message(message):
             logger.warning("Missing required fields in parsed message")
             return None
 
-        logger.debug(f"Successfully parsed message: {result}")
+        logger.info(f"Successfully parsed message: {result}")
         return result
 
     except Exception as e:
@@ -376,7 +376,7 @@ def order_king_executer(result):
 
     if result:
         print(result)
-        logging.debug(f"result data: {result}")
+        logging.info(f"result data: {result}")
         exchange = result["exchange"]
         main_symbol = result["symbol"]
         buyfut = int(result["buyfut"])
@@ -392,7 +392,7 @@ def order_king_executer(result):
         print("Open Price:", open_price)
         print("exchnage :", exchange)
 
-        logging.debug(f"buyfut data: {buyfut},type: {type(buyfut)}")
+        logging.info(f"buyfut data: {buyfut},type: {type(buyfut)}")
 
         if buyfut == 1:
             print(f"Symbol: {main_symbol} -> use future chart for this")
@@ -502,7 +502,7 @@ def process_message():
             try:
                 json_data = request.get_json()
                 logger.info(f"Received JSON webhook data")
-                logger.debug(f"JSON content: {json_data}")
+                logger.info(f"JSON content: {json_data}")
             except Exception as e:
                 logger.error(f"Failed to parse JSON: {e}")
                 return jsonify({"error": "Invalid JSON format"}), 400
@@ -567,7 +567,7 @@ def process_message():
 
             # Parse JSON trading message
             parsed_data = parse_json_message(json_data)
-            logger.debug(f"Parsed data: {parsed_data}")
+            logger.info(f"Parsed data: {parsed_data}")
 
             if parsed_data:
                 try:
