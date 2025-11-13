@@ -318,7 +318,7 @@ def parse_message(message):
         # Extract position
         position_match = re.search(r"New strategy position is ([\-\d]+)", message)
         if position_match:
-            result["new_strategy_position"] = position_match.group(1)
+            result["position_size"] = position_match.group(1)
         else:
             logger.warning("Could not extract position from message")
             return None
@@ -359,7 +359,7 @@ def parse_message(message):
             result["interval"] = interval_match.group(1)[:20]  # Limit length
 
         # Ensure we have minimum required fields
-        required_fields = ["exchange", "symbol", "new_strategy_position"]
+        required_fields = ["exchange", "symbol", "position_size"]
         if not all(field in result for field in required_fields):
             logger.warning("Missing required fields in parsed message")
             return None
@@ -381,13 +381,13 @@ def order_king_executer(result):
         main_symbol = result["symbol"]
         buyfut = int(result["buyfut"])
 
-        new_strategy_position = int(result["new_strategy_position"])
+        position_size = int(result["position_size"])
         comment = result["comment"]
         open_price = float(result["open_price"])
         order_type = result["order_type"]
         print("Extracted Values:")
         print("Symbol:", main_symbol)
-        print("New Strategy Position:", new_strategy_position)
+        print("Position Size:", position_size)
         print("Comment:", comment)
         print("Open Price:", open_price)
         print("exchnage :", exchange)
@@ -425,7 +425,7 @@ def order_king_executer(result):
         # first_symbol, first_main_symbol, first_symbol_lot, first_expiry_date, main_ss = getting_strike(symbol=main_symbol, option_type=option_type, strike=strike, date=date)
         first_symbol = str(first_symbol)
         first_symbol_lot = int(first_symbol_lot)
-        new_strategy_position = first_symbol_lot * new_strategy_position
+        position_qty = first_symbol_lot * position_size
 
         if first_symbol is not None:
 
@@ -457,7 +457,7 @@ def order_king_executer(result):
                 print("short entry called ")
                 order_placement_sell_side(
                     symbol=first_symbol,
-                    qty=new_strategy_position,
+                    qty=position_qty,
                     limitPrice=open_price,
                     order_type=order_type,
                 )
@@ -466,7 +466,7 @@ def order_king_executer(result):
                 print("long entry called")
                 order_placement_buy_side(
                     symbol=first_symbol,
-                    qty=new_strategy_position,
+                    qty=position_qty,
                     limitPrice=open_price,
                     order_type=order_type,
                 )
@@ -475,7 +475,7 @@ def order_king_executer(result):
                 or comment == "long exit fifty at three x"
             ):
                 print("half qty exit thing called ")
-                exit_half_position(symbol=first_symbol, match_qty=new_strategy_position)
+                exit_half_position(symbol=first_symbol, match_qty=position_qty)
             else:
                 print("no condition satisfy ")
         else:
