@@ -32,7 +32,7 @@ logging.basicConfig(
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN")
 TEST3_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
-FLASK_PORT = int(os.getenv("FLASK_PORT", 5035))
+FLASK_PORT = int(os.getenv("FLASK_PORT", 5008))
 
 # Validate required environment variables
 if not all([TOKEN_TELEGRAM, TEST3_CHAT_ID]):

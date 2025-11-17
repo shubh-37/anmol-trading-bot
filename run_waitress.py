@@ -104,7 +104,7 @@ if __name__ == "__main__":
 
         # Get configuration from environment
         host = os.getenv("FLASK_HOST", "0.0.0.0")
-        port = int(os.getenv("FLASK_PORT", 5035))
+        port = int(os.getenv("FLASK_PORT", 5008))
         threads = int(os.getenv("WAITRESS_THREADS", 4))
 
         # Print startup banner
