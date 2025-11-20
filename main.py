@@ -396,7 +396,7 @@ def order_king_executer(result):
         if buyfut == 1:
             print(f"Symbol: {main_symbol} -> use future chart for this")
             first_symbol, first_symbol_lot = get_future_name(
-                symbol=main_symbol, exchnge=exchange
+                symbol=main_symbol, exchange=exchange
             )
         else:
             ext_value = extract_option_details(main_symbol)
